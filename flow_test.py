@@ -18,8 +18,10 @@ os.environ.setdefault("TZ", "Europe/Moscow")
 from telegram import (  # noqa: E402
     CallbackQuery,
     Chat,
+    Document,
     Message,
     MessageEntity,
+    PhotoSize,
     Update,
     User,
 )
@@ -699,6 +701,36 @@ async def run() -> None:
     check(db.close_episode(uid, raced.id) is None,
           "close_episode отклоняет уже закрытый эпизод")
     db.delete_episode(uid, raced.id)
+
+    # 19d. Присланный файл получает ответ, а не тишину. Вложения намеренно не
+    # храним, но молчание человек читает как «бот сломан».
+    def file_update(photo=False, user=USER):
+        chat = Chat(id=user.id, type="private")
+        if photo:
+            extra = {"photo": (PhotoSize(file_id="PH", file_unique_id="u1",
+                                         width=90, height=90),)}
+        else:
+            extra = {"document": Document(file_id="DOC", file_unique_id="u2",
+                                          file_name="holter.pdf")}
+        msg = Message(message_id=30, date=datetime.now(timezone.utc), chat=chat,
+                      from_user=user, **extra)
+        msg.set_bot(fake)
+        return Update(update_id=30, message=msg)
+
+    handlers = build_handlers()
+    for photo in (False, True):
+        upd = file_update(photo=photo)
+        takers = [h.callback.__name__ for h in handlers
+                  if h.check_update(upd) not in (False, None)]
+        check(takers == ["on_file"],
+              f"{'фото' if photo else 'документ'} попадает в хендлер ({takers})")
+    fake.sent.clear()
+    before_files = db.count_episodes(uid)
+    await bot.on_file(file_update(), make_context(fake, {}))
+    check(any(t(LANG, "file_declined") in m for m in fake.sent),
+          "на файл приходит объяснение, а не тишина")
+    check(db.count_episodes(uid) == before_files,
+          "и файл не создаёт эпизодов на пустом месте")
 
     # 20. Удаление с подтверждением.
     last_id = db.last_episode(uid).id

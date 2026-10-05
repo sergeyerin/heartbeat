@@ -847,6 +847,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                      _note_header(lang, status, t(lang, "note_appended", id=ep.id)))
 
 
+async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Фото или документ: вежливо отказываем.
+
+    Вложения в боте не хранятся осознанно (см. CLAUDE.md: сценарий опирался на
+    прибор, которого у пользователя нет, а копии ЭКГ из поликлиники и отчётов
+    холтера и так есть у врача). Но и ронять файл в тишину нельзя: человек,
+    попробовавший очевидное, решает, что бот сломан.
+    """
+    await update.message.reply_text(t(_lang(update), "file_declined"))
+
+
 # --- inline-кнопки ---------------------------------------------------------
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1421,6 +1432,13 @@ def register_handlers(app) -> None:
         on_menu_button,
     ))
     app.add_handler(CallbackQueryHandler(on_callback))
+    # Файлы не храним, но отвечаем: без этого хендлера присланное фото не
+    # попадало ни в один обработчик, и человек получал молчание.
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.AUDIO
+         | filters.VOICE) & PRIVATE & filters.UpdateType.MESSAGE,
+        on_file,
+    ))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & PRIVATE & filters.UpdateType.MESSAGE, on_text
     ))

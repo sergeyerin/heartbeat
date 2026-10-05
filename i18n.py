@@ -329,6 +329,16 @@ STRINGS: dict[str, dict[str, str]] = {
     },
 
     # --- экспорт ---
+    # Файл присылать некуда, но и молчать нельзя: без ответа человек решает,
+    # что бот сломан. Вложения намеренно не делаем — см. CLAUDE.md.
+    "file_declined": {
+        "ru": "Файлы я не храню — расскажите словами, что было, или пришлите "
+              "число, если это пульс. Сам файл остался у вас в чате, он не "
+              "потерялся.",
+        "en": "I don't keep files — tell me in words what happened, or send a "
+              "number if that was your pulse. The file itself is still in this "
+              "chat, it is not lost.",
+    },
     "nothing_to_export": {"ru": "Пока нечего выгружать — записей нет.",
                           "en": "Nothing to export yet — no records.",
 },
