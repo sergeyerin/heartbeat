@@ -83,10 +83,51 @@ class FakeBot:
         return noop
 
 
-def age_out(user_id: int, episode_id: int) -> None:
-    """Уводит эпизод на два дня назад — чтобы он перестал быть «текущим»."""
-    db.shift_start(user_id, episode_id, -60 * 48)
-    db.close_episode(user_id, episode_id, ended_at=db.utcnow() - timedelta(days=2))
+def build_handlers():
+    """Хендлеры так, как их регистрирует build_app, но без сетевого клиента."""
+    import telegram.ext as tg_ext
+    collected = []
+
+    class _Collector:
+        def add_handler(self, handler, group=0):
+            collected.append(handler)
+
+    original = bot.ApplicationBuilder
+    bot.build_app.__globals__["ApplicationBuilder"] = original
+    app = _Collector()
+    # Повторяем регистрацию из build_app: сам build_app требует токен и сеть.
+    for name, handler in (
+        ("start", bot.cmd_start), ("help", bot.cmd_help), ("lang", bot.cmd_lang),
+        ("cancel", bot.cmd_cancel), ("log", bot.action_start_episode),
+        ("stop", bot.action_end_episode), ("med", bot.action_med),
+        ("last", bot.cmd_last), ("today", bot.action_today),
+        ("yesterday", bot.cmd_yesterday), ("week", bot.cmd_week),
+        ("month", bot.cmd_month), ("export", bot.action_export),
+    ):
+        app.add_handler(tg_ext.CommandHandler(name, handler, filters=bot.PRIVATE))
+    app.add_handler(tg_ext.MessageHandler(
+        tg_ext.filters.Text(list(bot.ACTION_BY_TEXT)) & bot.PRIVATE, bot.on_menu_button))
+    app.add_handler(tg_ext.MessageHandler(
+        tg_ext.filters.TEXT & ~tg_ext.filters.COMMAND & bot.PRIVATE, bot.on_text))
+    return collected
+
+
+def age_out(user_id: int, episode_id: int, days: int = 2) -> None:
+    """Переводит часы эпизода на `days` назад, сохраняя его длительность.
+
+    Пишет в БД напрямую: это фикстура времени, а не действие пользователя.
+    Через db.shift_start/close_episode так уже нельзя — они (правильно)
+    отказываются менять закрытый эпизод.
+    """
+    ep = db.get_episode(user_id, episode_id)
+    delta = (db.utcnow() - timedelta(days=days)) - ep.started_at
+    ended = db._iso(ep.ended_at + delta) if ep.ended_at else None
+    db._db().execute(
+        "UPDATE episodes SET started_at = ?, ended_at = ?, confirmed_at = NULL "
+        "WHERE id = ? AND user_id = ?",
+        (db._iso(ep.started_at + delta), ended, episode_id, user_id),
+    )
+    db._db().commit()
 
 
 class FakeJobQueue:
@@ -297,11 +338,11 @@ async def run() -> None:
     check(db.get_episode(uid, ep.id).pulse is None, "забытый эпизод свободный ввод не ловит")
 
     # Длительность забытого — по памяти, помечается примерной.
-    await press(f"ap:{ep.id}:45")
+    await press(f"ap:{ep.id}:30")
     stale_closed = db.get_episode(uid, ep.id)
     check(not stale_closed.is_open and stale_closed.end_approx,
           "длительность забытого эпизода записана как примерная")
-    check(stale_closed.duration() == timedelta(minutes=45), "записано ровно 45 минут")
+    check(stale_closed.duration() == timedelta(minutes=30), "записано ровно 30 минут")
 
     # Вариант «не знаю»: эпизод остаётся без окончания, но не теряется.
     unknown = db.start_episode(uid, started_at=db.utcnow() - timedelta(hours=20))
@@ -379,7 +420,82 @@ async def run() -> None:
     await bot.cmd_help(text_update(fake, "/help", user=german), make_context(fake, {}))
     check(any("Comandos" in m for m in fake.sent), "дальше бот говорит по-португальски")
 
-    # 16. Удаление с подтверждением.
+    # 16. M1: бот не работает в группах.
+    group = Chat(id=-1001234567890, type="supergroup")
+    gmsg = Message(message_id=9, date=datetime.now(timezone.utc), chat=group,
+                   from_user=USER, text=t(LANG, "btn_start"), entities=[])
+    gmsg.set_bot(fake)
+    gupd = Update(update_id=9, message=gmsg)
+    check(not bot._is_private(gupd), "сообщение из группы не считается приватным")
+    private_handlers = [
+        h for h in build_handlers()
+        if h.check_update(gupd) not in (False, None)
+    ]
+    check(not private_handlers, f"ни один хендлер не берёт группу ({private_handlers})")
+
+    # Нажатие инлайн-кнопки из группы: данные берутся по нажавшему, а ответ
+    # ушёл бы в группу — именно так чужой дневник и утекал.
+    gq = CallbackQuery(id="g", from_user=USER, chat_instance="ci", data="csv", message=gmsg)
+    gq.set_bot(fake)
+    fake.documents.clear(); fake.sent.clear()
+    await bot.on_callback(Update(update_id=10, callback_query=gq), make_context(fake, {}))
+    check(not fake.documents and not fake.sent,
+          "нажатие из группы не отправляет ни файла, ни сообщения")
+
+    # 17. M3: подделанный callback_data ничего не ломает и ничего не пишет.
+    victim = db.start_episode(uid)
+    before = report.episode_card(victim, LANG)
+    hostile = [
+        f"s:{victim.id}:7", f"s:{victim.id}:-1", f"s:{victim.id}:abc",
+        f"ap:{victim.id}:999999999", f"ap:{victim.id}:7",
+        f"sh:{victim.id}:-999999", f"sh:{victim.id}:99999",
+        f"ts:{victim.id}:=HYPERLINK(1)", f"ts:{victim.id}:a,b", f"tt:{victim.id}:nope",
+        "r:0", "r:-5", "r:99999999999", "dn:not-a-date", "dn:0001-01-01",
+        "np:999999", "np:0", "mn:1:-1", "mn:99:0", "mt:abc", "lang:xx", "s:abc:1",
+        "e:", "s", "", "dy:999999",
+    ]
+    for data in hostile:
+        try:
+            await press(data)
+        except Exception as exc:  # noqa: BLE001
+            check(False, f"подделанный callback уронил хендлер: {data!r} → {exc!r}")
+    check(db.get_lang(uid) == LANG, "подделанный lang:xx не переключил язык")
+    after = db.get_episode(uid, victim.id)
+    check(after is not None, "эпизод не удалён подделанным callback")
+    check(report.episode_card(after, LANG) == before,
+          "подделанный callback ничего не изменил в эпизоде")
+    check(after.symptoms == [] and after.triggers == [],
+          f"мусорные коды не попали в симптомы ({after.symptoms}, {after.triggers})")
+    check(after.severity is None, "недопустимый уровень тяжести не записан")
+    # Сводка дня после всего этого всё ещё собирается
+    s_, e_ = report.day_bounds(report.today_local())
+    check(bool(report.day_summary(report.today_local(),
+                                  db.list_episodes(uid, s_, e_),
+                                  db.list_meds(uid, s_, e_), LANG)),
+          "сводка дня не сломана мусорными данными")
+    db.delete_episode(uid, victim.id)
+
+    # 18. M4: название лекарства берётся из снимка, а не из переставшего
+    # совпадать индекса. Раньше нажатие на «Б» сохраняло «А».
+    ud2: dict = {}
+    ctx2 = make_context(fake, ud2)
+    db.add_med(uid, "препарат-А", db.utcnow() - timedelta(days=4))
+    db.add_med(uid, "препарат-Б", db.utcnow() - timedelta(days=3))
+    await bot.action_med(text_update(fake, t(LANG, "btn_med")), ctx2)
+    shown = [n for n in db.recent_med_names(uid) if n.startswith("препарат")]
+    med_id = db.all_meds(uid)[-1].id
+    snapshot = ud2.get(f"med_opts:{med_id}") or []
+    check(snapshot[:len(shown)] == shown or shown[0] in snapshot, "снимок списка сохранён")
+    shown = snapshot  # дальше работаем именно с тем, что человек видел
+    # Пока карточка висит, порядок в БД меняется
+    db.add_med(uid, shown[-1], db.utcnow())
+    check(db.recent_med_names(uid) != shown, "порядок в БД успел измениться")
+    await bot.on_callback(callback_update(fake, f"mn:{med_id}:0"), ctx2)
+    saved = [m for m in db.all_meds(uid) if m.id == med_id][0]
+    check(saved.name == shown[0],
+          f"сохранено лекарство с нажатой кнопки ({saved.name!r} == {shown[0]!r})")
+
+    # 19. Удаление с подтверждением.
     last_id = db.last_episode(uid).id
     await press(f"d:{last_id}")
     check(any("Удалить эпизод" in t for t in fake.edited), "спросил подтверждение удаления")

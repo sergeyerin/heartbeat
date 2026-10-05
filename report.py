@@ -19,6 +19,22 @@ from i18n import csv_header, months, t, weekdays
 # Границы «времени суток» для гистограммы отчёта
 HOUR_BUCKETS = ((0, 6), (6, 12), (12, 18), (18, 24))
 
+# Excel и LibreOffice исполняют ячейку, начинающуюся с этих символов. Файл
+# задуман для передачи врачу, то есть открывается на чужой машине, поэтому
+# любое пользовательское поле обезвреживается апострофом.
+CSV_RISKY_PREFIX = ("=", "+", "-", "@", "\t", "\r")
+
+# Длина заметки в ленте дня: в сводке их может быть много, а лимит сообщения
+# Telegram один на всех. Полный текст виден в карточке эпизода.
+FEED_NOTE_LIMIT = 200
+
+
+def csv_safe(value):
+    """Обезвреживает ячейку CSV, не меняя её содержимого для человека."""
+    if isinstance(value, str) and value[:1] in CSV_RISKY_PREFIX:
+        return "'" + value
+    return value
+
 
 def local(dt: datetime) -> datetime:
     return dt.astimezone(config.local_tz())
@@ -128,7 +144,9 @@ def _episode_line(ep: Episode, now: datetime, lang: str) -> list[str]:
                  dur=duration_label(ep, lang))
     tail = []
     if ep.severity:
-        tail.append(vocab.severity(lang)[ep.severity])
+        # .get, а не [] — неожиданное значение в колонке (старая запись, ручная
+        # правка базы) должно ухудшить одну строку, а не сломать всю сводку дня.
+        tail.append(vocab.severity(lang).get(ep.severity, str(ep.severity)))
     if ep.pulse:
         tail.append(t(lang, "card_pulse", value=ep.pulse).lower())
     out = [head + (" · " + " · ".join(tail) if tail else "") + f"  [#{ep.id}]"]
@@ -141,8 +159,15 @@ def _episode_line(ep: Episode, now: datetime, lang: str) -> list[str]:
         out.append(t(lang, "line_triggers",
                      list=", ".join(vocab.labels(ep.triggers, vocab.triggers(lang)))))
     if ep.note:
-        # Заметка может быть многострочной — отбиваем каждую строку.
-        out += ["    « " + part + " »" for part in ep.note.splitlines() if part.strip()]
+        # Заметка может быть многострочной — отбиваем каждую строку. В ленте
+        # показываем начало: полный текст есть в карточке эпизода.
+        for part in ep.note.splitlines():
+            part = part.strip()
+            if not part:
+                continue
+            if len(part) > FEED_NOTE_LIMIT:
+                part = part[:FEED_NOTE_LIMIT] + "…"
+            out.append("    « " + part + " »")
     return out
 
 
@@ -291,15 +316,15 @@ def episodes_csv(episodes: list[Episode], meds: list[Med], lang: str) -> bytes:
             t(lang, "csv_yes") if ep.end_approx else "",
             sev.get(ep.severity, ""),
             ep.pulse or "",
-            ", ".join(vocab.labels(ep.symptoms, vocab.symptoms(lang))),
-            ", ".join(vocab.labels(ep.triggers, vocab.triggers(lang))),
-            (ep.note or "").replace("\n", " / "),
+            csv_safe(", ".join(vocab.labels(ep.symptoms, vocab.symptoms(lang)))),
+            csv_safe(", ".join(vocab.labels(ep.triggers, vocab.triggers(lang)))),
+            csv_safe((ep.note or "").replace("\n", " / ").replace("\r", " ")),
         ]))
     for med in meds:
         taken = local(med.taken_at)
         rows.append((med.taken_at, [
             t(lang, "csv_type_med"), med.id, taken.strftime("%Y-%m-%d"),
-            taken.strftime("%H:%M"), "", "", "", "", "", "", "", med.name or "",
+            taken.strftime("%H:%M"), "", "", "", "", "", "", "", csv_safe(med.name or ""),
         ]))
     for _, row in sorted(rows, key=lambda item: item[0]):
         writer.writerow(row)

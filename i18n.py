@@ -64,7 +64,9 @@ STRINGS: dict[str, dict[str, str]] = {
     "btn_reopen": {"ru": "↩️ Ещё идёт", "en": "↩️ Still ongoing", "pt": "↩️ Ainda a decorrer"},
     "btn_delete": {"ru": "🗑 Удалить", "en": "🗑 Delete", "pt": "🗑 Eliminar"},
     "btn_done": {"ru": "← Готово", "en": "← Done", "pt": "← Pronto"},
-    "btn_back": {"ru": "← Отмена", "en": "← Cancel", "pt": "← Cancelar"},
+    # «Отмена» в подтверждении удаления двусмысленна (отменить удаление или
+    # отменить эпизод?) — безопасный выбор должен называть себя сам.
+    "btn_back": {"ru": "← Не удалять", "en": "← Keep it", "pt": "← Não eliminar"},
     "btn_no": {"ru": "Нет", "en": "No", "pt": "Não"},
     "btn_how_long": {"ru": "⏱ Сколько длилось?", "en": "⏱ How long did it last?",
                      "pt": "⏱ Quanto tempo durou?"},
@@ -73,6 +75,9 @@ STRINGS: dict[str, dict[str, str]] = {
     "btn_dont_remember": {"ru": "🤷 Не помню, когда прошло",
                           "en": "🤷 Don't remember when it stopped",
                           "pt": "🤷 Não me lembro quando passou"},
+    "btn_clear_note": {"ru": "🗑 Очистить заметку", "en": "🗑 Clear the note",
+                       "pt": "🗑 Apagar a nota"},
+    "btn_cancel": {"ru": "← Отмена", "en": "← Cancel", "pt": "← Cancelar"},
     "btn_med_other": {"ru": "✏️ Другое", "en": "✏️ Other", "pt": "✏️ Outro"},
     "btn_med_cancel": {"ru": "🗑 Отменить", "en": "🗑 Undo", "pt": "🗑 Anular"},
     "btn_csv": {"ru": "📤 Выгрузить в CSV", "en": "📤 Export to CSV",
@@ -96,7 +101,10 @@ STRINGS: dict[str, dict[str, str]] = {
               "• просто текст — заметка к текущему эпизоду;\n"
               "• «{btn_today}» — что было за день, «{btn_report}» — статистика, "
               "«{btn_export}» — CSV для врача.\n\n"
-              "Записал не сразу? На карточке есть «⏪ начало −5/−15/−30 мин».\n"
+              "Записал не сразу? На карточке есть «⏪ начало −5/−15/−30 мин».\n\n"
+              "⚕️ Я дневник, а не медицинская рекомендация: я записываю то, что вы "
+              "мне говорите, и ничего не оцениваю и не советую. Решения обсуждайте "
+              "с врачом. Записи хранятся на сервере бота, у каждого свои.\n"
               "Язык: /lang",
         "en": "Hi! I'm your arrhythmia diary.\n\n"
               "When an episode starts, tap «{btn_start}» below — I log the time "
@@ -108,7 +116,11 @@ STRINGS: dict[str, dict[str, str]] = {
               "• send plain text — it becomes a note on the current episode;\n"
               "• «{btn_today}» shows the day, «{btn_report}» the statistics, "
               "«{btn_export}» a CSV for your doctor.\n\n"
-              "Logged it late? The card has «⏪ start −5/−15/−30 min».\n"
+              "Logged it late? The card has «⏪ start −5/−15/−30 min».\n\n"
+              "⚕️ I am a diary, not medical advice: I record what you tell me and "
+              "never assess or recommend anything. Discuss decisions with your "
+              "doctor. Records are kept on the bot's server, separately per "
+              "person.\n"
               "Language: /lang",
         "pt": "Olá! Sou o seu diário de arritmia.\n\n"
               "Quando começar um episódio, toque em «{btn_start}» aqui abaixo — "
@@ -121,7 +133,10 @@ STRINGS: dict[str, dict[str, str]] = {
               "• envie texto simples — fica como nota do episódio atual;\n"
               "• «{btn_today}» mostra o dia, «{btn_report}» as estatísticas, "
               "«{btn_export}» um CSV para o médico.\n\n"
-              "Registou tarde? O cartão tem «⏪ início −5/−15/−30 min».\n"
+              "Registou tarde? O cartão tem «⏪ início −5/−15/−30 min».\n\n"
+              "⚕️ Sou um diário, não um conselho médico: registo o que me diz e "
+              "não avalio nem recomendo nada. Fale das decisões com o seu médico. "
+              "Os registos ficam no servidor do bot, separados por pessoa.\n"
               "Idioma: /lang",
     },
     "help": {
@@ -189,6 +204,9 @@ STRINGS: dict[str, dict[str, str]] = {
                 "pt": "O episódio #{id} já foi eliminado."},
     "ep_not_found": {"ru": "Эпизод не найден", "en": "Episode not found",
                      "pt": "Episódio não encontrado"},
+    "ep_state_changed": {"ru": "Эпизод уже в другом состоянии — обновил карточку",
+                         "en": "This episode already changed — card refreshed",
+                         "pt": "O episódio já mudou — cartão atualizado"},
     "ep_deleted_msg": {"ru": "Эпизод удалён.", "en": "Episode deleted.",
                        "pt": "Episódio eliminado."},
     "no_active": {"ru": "Сейчас нет активного эпизода. Начался приступ — «{btn_start}».",
@@ -222,6 +240,11 @@ STRINGS: dict[str, dict[str, str]] = {
                           "/cancel para anular."},
     "note_saved": {"ru": "📝 Заметка добавлена.", "en": "📝 Note added.",
                    "pt": "📝 Nota adicionada."},
+    "note_cleared": {"ru": "📝 Заметка очищена.", "en": "📝 Note cleared.",
+                     "pt": "📝 Nota apagada."},
+    "note_trimmed": {"ru": "Заметка обрезана: максимум {n} символов.",
+                     "en": "The note was trimmed: {n} characters maximum.",
+                     "pt": "A nota foi cortada: máximo de {n} caracteres."},
     "note_appended": {"ru": "📝 Дописал в эпизод #{id}.",
                       "en": "📝 Appended to episode #{id}.",
                       "pt": "📝 Acrescentado ao episódio #{id}."},

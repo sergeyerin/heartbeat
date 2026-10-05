@@ -57,6 +57,13 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_meds_user_time ON meds(user_id, taken_at)",
 )
 
+# Лимиты заметки. Сообщение Telegram — 4096 символов, а карточка эпизода и
+# сводка дня включают заметку целиком: без лимита одна длинная заметка делает
+# их неотправляемыми навсегда. Запас оставлен на остальные строки карточки.
+MAX_NOTE_CHUNK = 1000
+MAX_NOTE_TOTAL = 3000
+NOTE_CUT_MARK = " […]"
+
 _conn: sqlite3.Connection | None = None
 
 
@@ -262,28 +269,40 @@ def last_episode(user_id: int) -> Episode | None:
 
 def close_episode(user_id: int, episode_id: int, ended_at: datetime | None = None,
                   approx: bool = False) -> Episode | None:
+    """Закрывает ОТКРЫТЫЙ эпизод. Возвращает None, если он уже закрыт.
+
+    Условие ``ended_at IS NULL`` в UPDATE — второй рубеж после проверки в боте:
+    инлайн-кнопки живут в истории чата вечно, и нажатие на старую карточку не
+    должно перезаписывать уже записанное время окончания.
+    """
     end = ended_at or utcnow()
     ep = get_episode(user_id, episode_id)
-    if ep is None:
+    if ep is None or not ep.is_open:
         return None
     # Отрицательной длительности быть не должно: сдвиг конца не раньше начала.
     if end < ep.started_at:
         end = ep.started_at
-    _db().execute(
-        "UPDATE episodes SET ended_at = ?, end_approx = ? WHERE id = ? AND user_id = ?",
+    cur = _db().execute(
+        "UPDATE episodes SET ended_at = ?, end_approx = ? "
+        "WHERE id = ? AND user_id = ? AND ended_at IS NULL",
         (_iso(end), 1 if approx else 0, episode_id, user_id),
     )
     _db().commit()
+    if cur.rowcount == 0:
+        return None
     return get_episode(user_id, episode_id)
 
 
 def reopen_episode(user_id: int, episode_id: int) -> Episode | None:
-    _db().execute(
+    """Возвращает ЗАКРЫТЫЙ эпизод в работу. None, если он и так открыт."""
+    cur = _db().execute(
         "UPDATE episodes SET ended_at = NULL, end_approx = 0, confirmed_at = ? "
-        "WHERE id = ? AND user_id = ?",
+        "WHERE id = ? AND user_id = ? AND ended_at IS NOT NULL",
         (_iso(utcnow()), episode_id, user_id),
     )
     _db().commit()
+    if cur.rowcount == 0:
+        return None
     return get_episode(user_id, episode_id)
 
 
@@ -329,7 +348,10 @@ def append_note(user_id: int, episode_id: int, text: str) -> Episode | None:
     ep = get_episode(user_id, episode_id)
     if ep is None:
         return None
-    note = f"{ep.note}\n{text}" if ep.note else text
+    chunk = text[:MAX_NOTE_CHUNK]
+    note = f"{ep.note}\n{chunk}" if ep.note else chunk
+    if len(note) > MAX_NOTE_TOTAL:
+        note = note[:MAX_NOTE_TOTAL - len(NOTE_CUT_MARK)] + NOTE_CUT_MARK
     _db().execute(
         "UPDATE episodes SET note = ? WHERE id = ? AND user_id = ?",
         (note, episode_id, user_id),
@@ -348,11 +370,15 @@ def clear_note(user_id: int, episode_id: int) -> Episode | None:
 
 
 def shift_start(user_id: int, episode_id: int, minutes: int) -> Episode | None:
-    """Сдвигает начало эпизода (обычно назад: записал не сразу)."""
+    """Сдвигает начало открытого эпизода (обычно назад: записал не сразу).
+
+    Начало не уезжает в будущее и не перескакивает время окончания — иначе
+    длительность стала бы отрицательной.
+    """
     ep = get_episode(user_id, episode_id)
-    if ep is None:
+    if ep is None or not ep.is_open:
         return None
-    started = ep.started_at + timedelta(minutes=minutes)
+    started = min(ep.started_at + timedelta(minutes=minutes), utcnow())
     _db().execute(
         "UPDATE episodes SET started_at = ? WHERE id = ? AND user_id = ?",
         (_iso(started), episode_id, user_id),

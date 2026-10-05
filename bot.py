@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from telegram import (
     BotCommand,
+    Chat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputFile,
@@ -46,12 +47,22 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("heartbeat")
 
+PRIVATE = filters.ChatType.PRIVATE
+
 PULSE_RE = re.compile(r"^\s*(\d{2,3})\s*$")
 MIN_PULSE, MAX_PULSE = 20, 300
 REPORT_PERIODS = (7, 30, 90)
+# Нижняя граница листания сводок: раньше дневников не бывает, а date.min
+# ломает арифметику в клавиатуре.
+DAY_NAV_MIN = date(2020, 1, 1)
 SHIFT_CHOICES = (5, 15, 30)
+SEVERITY_LEVELS = (1, 2, 3)
 # Варианты для «не помню, когда отпустило»: ставим примерную длительность.
 DURATION_CHOICES = (15, 30, 60, 120, 240, 480)
+
+# Какие действия над эпизодом осмысленны только в определённом состоянии.
+NEEDS_OPEN = frozenset({"e", "sh", "ap", "apm", "go", "unk"})
+NEEDS_CLOSED = frozenset({"ro"})
 
 MENU_ACTIONS = ("btn_start", "btn_end", "btn_med", "btn_today", "btn_report", "btn_export")
 # Текст кнопки приходит обратно от Telegram, поэтому разбираем его по всем
@@ -59,6 +70,30 @@ MENU_ACTIONS = ("btn_start", "btn_end", "btn_med", "btn_today", "btn_report", "b
 ACTION_BY_TEXT = {
     t(lang, key): key for key in MENU_ACTIONS for lang in i18n.SUPPORTED
 }
+
+
+# --- разбор callback_data --------------------------------------------------
+# Payload кнопки управляется клиентом: модифицированный клиент может прислать
+# что угодно. Поэтому каждое значение сверяется с тем набором, из которого его
+# вообще могла бы предложить кнопка, а не просто приводится к int.
+
+def _arg(parts: list[str], index: int, allowed=None) -> int | None:
+    try:
+        value = int(parts[index])
+    except (IndexError, ValueError, TypeError):
+        return None
+    if allowed is not None and value not in allowed:
+        return None
+    return value
+
+
+def _episode_id(parts: list[str]) -> int | None:
+    if len(parts) < 2 or not parts[1].isdecimal():
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
 
 
 # --- язык ------------------------------------------------------------------
@@ -133,7 +168,7 @@ def card_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
                 ("✅ " if ep.severity == level else "") + severity[level],
                 callback_data=f"s:{ep.id}:{level}",
             )
-            for level in (1, 2, 3)
+            for level in SEVERITY_LEVELS
         ],
         [
             InlineKeyboardButton(
@@ -227,10 +262,69 @@ def _lang_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+# --- отправка длинных текстов ----------------------------------------------
+# Лимит сообщения Telegram — 4096, причём считаются UTF-16-единицы, а не
+# символы, поэтому берём запас. Сводка за день с десятком эпизодов или отчёт
+# могут его перерасти, и тогда они не отправляются ВООБЩЕ — то есть ломаются
+# насовсем. Длина заметки ограничена в db, это второй рубеж на выводе.
+TG_TEXT_LIMIT = 3800
+
+
+def _split(text: str, limit: int = TG_TEXT_LIMIT) -> list[str]:
+    """Режет текст по строкам, чтобы каждая часть влезала в сообщение."""
+    if len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        line = line[:limit]
+        if current and len(current) + len(line) + 1 > limit:
+            parts.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current:
+        parts.append(current)
+    return parts
+
+
+async def _send_text(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str,
+                     reply_markup=None) -> None:
+    """Отправляет текст, при необходимости частями. Клавиатура — к последней."""
+    chunks = _split(text)
+    for index, chunk in enumerate(chunks):
+        await context.bot.send_message(
+            chat_id, chunk,
+            reply_markup=reply_markup if index == len(chunks) - 1 else None,
+        )
+
+
+async def _edit_text(query, context, text: str, reply_markup=None) -> None:
+    """Правит сообщение на месте; слишком длинный текст досылает новым."""
+    if len(text) > TG_TEXT_LIMIT:
+        await _send_text(context, query.message.chat_id, text, reply_markup)
+        return
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup)
+    except Exception as exc:
+        if "not modified" not in str(exc):
+            log.warning("Сообщение не обновилось: %s", exc)
+
+
 # --- вспомогательное -------------------------------------------------------
 
 def _uid(update: Update) -> int:
     return update.effective_user.id
+
+
+def _is_private(update: Update) -> bool:
+    """Приватный ли диалог. Апдейты без пользователя (посты в канале) не наши."""
+    chat = update.effective_chat
+    return (
+        update.effective_user is not None
+        and chat is not None
+        and chat.type == Chat.PRIVATE
+    )
 
 
 def _active(user_id: int) -> db.Episode | None:
@@ -254,9 +348,7 @@ def _current_episode(user_id: int) -> db.Episode | None:
 async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE, ep: db.Episode,
                      lang: str, header: str = "") -> None:
     text = (header + "\n\n" if header else "") + report.episode_card(ep, lang)
-    await context.bot.send_message(
-        update.effective_chat.id, text, reply_markup=card_keyboard(ep, lang)
-    )
+    await _send_text(context, update.effective_chat.id, text, card_keyboard(ep, lang))
 
 
 async def _refresh(query, ep: db.Episode, lang: str) -> None:
@@ -456,11 +548,13 @@ async def action_med(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         [InlineKeyboardButton(name, callback_data=f"mn:{med.id}:{i}")]
         for i, name in enumerate(recent)
     ]
+    # Снимок именно этого набора кнопок: индекс в callback_data должен
+    # разрешаться тем списком, который человек видел, а не свежим запросом.
+    context.user_data[f"med_opts:{med.id}"] = list(recent)
     rows.append([
         InlineKeyboardButton(t(lang, "btn_med_other"), callback_data=f"mt:{med.id}"),
         InlineKeyboardButton(t(lang, "btn_med_cancel"), callback_data=f"md:{med.id}"),
     ])
-    context.user_data["med_names"] = recent
     await update.message.reply_text(
         t(lang, "med_logged", time=report.hhmm(med.taken_at)),
         reply_markup=InlineKeyboardMarkup(rows),
@@ -482,17 +576,16 @@ async def _send_day(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
     start, end = report.day_bounds(day)
     episodes = db.list_episodes(user_id, start, end)
     meds = db.list_meds(user_id, start, end)
-    await context.bot.send_message(
-        chat_id,
-        report.day_summary(day, episodes, meds, lang),
-        reply_markup=_day_keyboard(day),
+    await _send_text(
+        context, chat_id, report.day_summary(day, episodes, meds, lang), _day_keyboard(day)
     )
 
 
 async def action_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lang = _lang(update)
-    await update.message.reply_text(
-        _report_text(_uid(update), 7, lang), reply_markup=_report_keyboard(7, lang)
+    await _send_text(
+        context, update.effective_chat.id, _report_text(_uid(update), 7, lang),
+        _report_keyboard(7, lang),
     )
 
 
@@ -502,8 +595,9 @@ async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_month(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lang = _lang(update)
-    await update.message.reply_text(
-        _report_text(_uid(update), 30, lang), reply_markup=_report_keyboard(30, lang)
+    await _send_text(
+        context, update.effective_chat.id, _report_text(_uid(update), 30, lang),
+        _report_keyboard(30, lang),
     )
 
 
@@ -587,7 +681,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data.pop("await", None)
             ep = db.append_note(user_id, target_id, text)
             if ep:
-                await _send_card(update, context, ep, lang, t(lang, "note_saved"))
+                header = t(lang, "note_saved")
+                if len(text) > db.MAX_NOTE_CHUNK:
+                    header += "\n" + t(lang, "note_trimmed", n=db.MAX_NOTE_CHUNK)
+                await _send_card(update, context, ep, lang, header)
             else:
                 await update.message.reply_text(t(lang, "ep_gone", id=target_id))
             return
@@ -630,13 +727,24 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     ep = db.append_note(user_id, ep.id, text)
-    await _send_card(update, context, ep, lang, t(lang, "note_appended", id=ep.id))
+    header = t(lang, "note_appended", id=ep.id)
+    if len(text) > db.MAX_NOTE_CHUNK:
+        header += "\n" + t(lang, "note_trimmed", n=db.MAX_NOTE_CHUNK)
+    await _send_card(update, context, ep, lang, header)
 
 
 # --- inline-кнопки ---------------------------------------------------------
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    # CallbackQueryHandler нельзя отфильтровать по типу чата так же, как
+    # сообщения: нажатия приходят и из групп. Отсекаем здесь.
+    if not _is_private(update):
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        return
     user_id = _uid(update)
     lang = _lang(update)
     parts = (query.data or "").split(":")
@@ -650,7 +758,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # --- действия, не привязанные к эпизоду ---
     if action == "lang":
-        chosen = i18n.normalize(parts[1]) or config.DEFAULT_LANG
+        chosen = i18n.normalize(parts[1]) if len(parts) > 1 else None
+        if chosen is None:
+            # Неизвестный код не должен молча переключать язык на дефолтный.
+            await ack()
+            return
         db.set_lang(user_id, chosen)
         await ack()
         await query.edit_message_text(t(chosen, "lang_set"))
@@ -662,14 +774,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if action == "r":
         await ack()
-        days = int(parts[1])
-        try:
-            await query.edit_message_text(
-                _report_text(user_id, days, lang), reply_markup=_report_keyboard(days, lang)
-            )
-        except Exception as exc:
-            if "not modified" not in str(exc):
-                log.warning("Отчёт не обновился: %s", exc)
+        days = _arg(parts, 1, REPORT_PERIODS)
+        if days is None:
+            return
+        await _edit_text(query, context, _report_text(user_id, days, lang),
+                         _report_keyboard(days, lang))
         return
     if action == "csv":
         await ack(t(lang, "csv_preparing"))
@@ -677,23 +786,35 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if action == "dn":
         await ack()
-        day = date.fromisoformat(parts[1])
-        start, end = report.day_bounds(day)
         try:
-            await query.edit_message_text(
-                report.day_summary(
-                    day, db.list_episodes(user_id, start, end),
-                    db.list_meds(user_id, start, end), lang,
-                ),
-                reply_markup=_day_keyboard(day),
-            )
-        except Exception as exc:
-            if "not modified" not in str(exc):
-                log.warning("Сводка за день не обновилась: %s", exc)
+            day = date.fromisoformat(parts[1])
+        except (IndexError, ValueError):
+            return
+        # Листать можно только по разумному диапазону: date.min ломает
+        # арифметику в клавиатуре, а будущее в дневнике смысла не имеет.
+        if not DAY_NAV_MIN <= day <= report.today_local():
+            return
+        start, end = report.day_bounds(day)
+        await _edit_text(
+            query, context,
+            report.day_summary(
+                day, db.list_episodes(user_id, start, end),
+                db.list_meds(user_id, start, end), lang,
+            ),
+            _day_keyboard(day),
+        )
         return
     if action == "nn":  # свободный текст → новый эпизод с этой заметкой
         await ack()
         note = context.user_data.pop("pending_note", None)
+        existing = _active(user_id)
+        if existing is not None:
+            # Эпизод успел начаться другим путём — дописываем в него, а не
+            # создаём второй открытый.
+            ep = db.append_note(user_id, existing.id, note) if note else existing
+            await query.edit_message_text(t(lang, "note_appended", id=ep.id))
+            await _send_card(update, context, ep, lang)
+            return
         ep = db.start_episode(user_id)
         if note:
             ep = db.append_note(user_id, ep.id, note)
@@ -701,32 +822,55 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _send_card(update, context, ep, lang)
         _schedule_reminder(context.job_queue, user_id, ep.id, config.EPISODE_WINDOW_MIN)
         return
-    if action == "nx":
+    if action == "nx":  # «Нет» / «Отмена» — снимает и ожидание ввода
         await ack()
         context.user_data.pop("pending_note", None)
-        await query.edit_message_text(t(lang, "not_logged"))
+        pending = context.user_data.pop("await", None)
+        await query.edit_message_text(
+            t(lang, "cancelled" if pending else "not_logged")
+        )
         return
     if action == "np":  # число без эпизода → эпизод + пульс
+        pulse = _arg(parts, 1, range(MIN_PULSE, MAX_PULSE + 1))
+        if pulse is None:
+            await ack()
+            return
         await ack()
+        # Тот же запрет на второй одновременный эпизод, что и у кнопки
+        # «⚡️ Аритмия»: кнопка из истории чата не должна его обходить.
+        existing = _active(user_id)
+        if existing is not None:
+            ep = db.set_pulse(user_id, existing.id, pulse)
+            await query.edit_message_text(t(lang, "pulse_to_ep", pulse=pulse, id=ep.id))
+            await _send_card(update, context, ep, lang)
+            return
         ep = db.start_episode(user_id)
-        ep = db.set_pulse(user_id, ep.id, int(parts[1]))
+        ep = db.set_pulse(user_id, ep.id, pulse)
         await query.edit_message_text(t(lang, "ep_recorded_pulse", id=ep.id, pulse=ep.pulse))
         await _send_card(update, context, ep, lang)
         _schedule_reminder(context.job_queue, user_id, ep.id, config.EPISODE_WINDOW_MIN)
         return
     if action in ("mn", "mt", "md"):  # лекарство: имя из истории / ввести / отменить
-        med_id = int(parts[1])
+        med_id = _arg(parts, 1)
+        if med_id is None or med_id < 0:
+            await ack()
+            return
         if action == "mn":
-            # Перечитываем из БД: user_data не переживает рестарт контейнера.
-            names = db.recent_med_names(user_id) or context.user_data.get("med_names") or []
-            idx = int(parts[2])
-            name = names[idx] if idx < len(names) else None
+            # M4: берём снимок списка, сделанный в момент отправки кнопок.
+            # Перечитывать из БД нельзя: порядок там «по последнему приёму» и
+            # меняется, поэтому индекс начинал указывать на другое лекарство.
+            names = context.user_data.get(f"med_opts:{med_id}") or []
+            idx = _arg(parts, 2, range(len(names))) if names else None
+            name = names[idx] if idx is not None else None
             if name:
                 db.set_med_name(user_id, med_id, name)
+                context.user_data.pop(f"med_opts:{med_id}", None)
                 await ack(t(lang, "ack_saved"))
                 await query.edit_message_text(t(lang, "med_saved", name=name))
             else:
                 await ack(t(lang, "med_list_stale"))
+                await query.message.reply_text(t(lang, "med_name_prompt"))
+                context.user_data["await"] = {"what": "med", "id": med_id}
             return
         if action == "mt":
             context.user_data["await"] = {"what": "med", "id": med_id}
@@ -739,10 +883,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     # --- действия над эпизодом ---
-    if len(parts) < 2 or not parts[1].isdigit():
+    episode_id = _episode_id(parts)
+    if episode_id is None:
         await ack()
         return
-    episode_id = int(parts[1])
     ep = db.get_episode(user_id, episode_id)
     if ep is None:
         await ack(t(lang, "ep_not_found"))
@@ -752,8 +896,24 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pass
         return
 
+    # M2: кнопки живут в истории чата вечно, и старая карточка нарисована в том
+    # состоянии, которое было на момент отправки. Применять её действие к
+    # эпизоду, который с тех пор изменился, нельзя: так закрытый эпизод получал
+    # новое время окончания, а длительность 20 минут превращалась в 2 часа.
+    if action in NEEDS_OPEN and not ep.is_open:
+        await ack(t(lang, "ep_state_changed"))
+        await _refresh(query, ep, lang)
+        return
+    if action in NEEDS_CLOSED and ep.is_open:
+        await ack(t(lang, "ep_state_changed"))
+        await _refresh(query, ep, lang)
+        return
+
     if action == "s":
-        level = int(parts[2])
+        level = _arg(parts, 2, tuple(SEVERITY_LEVELS))
+        if level is None:
+            await ack()
+            return
         # Повторное нажатие той же оценки снимает её.
         ep = db.set_severity(user_id, episode_id, None if ep.severity == level else level)
         await ack()
@@ -767,7 +927,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if action == "n":
         context.user_data["await"] = {"what": "note", "id": episode_id}
         await ack()
-        await query.message.reply_text(t(lang, "note_prompt", id=episode_id))
+        rows = [[InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="nx")]]
+        if ep.note:
+            # Заметка — единственное поле, которое раньше нельзя было
+            # поправить: пульс перезаписывается, переключатели снимаются,
+            # а дописанное в заметку убиралось только удалением эпизода.
+            rows.insert(0, [InlineKeyboardButton(
+                t(lang, "btn_clear_note"), callback_data=f"nc:{episode_id}"
+            )])
+        await query.message.reply_text(
+            t(lang, "note_prompt", id=episode_id),
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+    if action == "nc":
+        context.user_data.pop("await", None)
+        ep = db.clear_note(user_id, episode_id)
+        await ack(t(lang, "ack_ok"))
+        try:
+            await query.edit_message_text(t(lang, "note_cleared"))
+        except Exception:
+            pass
+        await _send_card(update, context, ep, lang)
         return
     if action == "m":
         kind = parts[2]
@@ -782,7 +963,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if action in ("ts", "tt"):
         column = "symptoms" if action == "ts" else "triggers"
-        ep = db.toggle_code(user_id, episode_id, column, parts[2])
+        codes = vocab.SYMPTOM_CODES if action == "ts" else vocab.TRIGGER_CODES
+        code = parts[2] if len(parts) > 2 else ""
+        if code not in codes:
+            # Иначе в колонку симптомов попадала произвольная строка, которая
+            # потом рендерилась в карточку, в ленту дня и в CSV.
+            await ack()
+            return
+        ep = db.toggle_code(user_id, episode_id, column, code)
         await ack()
         try:
             await query.edit_message_reply_markup(
@@ -797,7 +985,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _refresh(query, ep, lang)
         return
     if action == "e":
-        ep = db.close_episode(user_id, episode_id)
+        closed = db.close_episode(user_id, episode_id)
+        if closed is None:  # кто-то успел закрыть его раньше
+            await ack(t(lang, "ep_state_changed"))
+            await _refresh(query, db.get_episode(user_id, episode_id), lang)
+            return
+        ep = closed
         _cancel_reminder(context.job_queue, user_id, episode_id)
         await ack(t(lang, "ack_lasted", dur=report.human_duration(ep.duration(), lang)))
         await _refresh(query, ep, lang)
@@ -809,7 +1002,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
     if action == "ro":
-        ep = db.reopen_episode(user_id, episode_id)
+        reopened = db.reopen_episode(user_id, episode_id)
+        if reopened is None:
+            await ack(t(lang, "ep_state_changed"))
+            await _refresh(query, db.get_episode(user_id, episode_id), lang)
+            return
+        ep = reopened
         _schedule_reminder(context.job_queue, user_id, episode_id, config.EPISODE_WINDOW_MIN)
         await ack(t(lang, "ack_reopened"))
         await _refresh(query, ep, lang)
@@ -854,11 +1052,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             log.warning("Меню длительности не открылось: %s", exc)
         return
     if action == "ap":  # примерная длительность от начала эпизода
-        minutes = int(parts[2])
-        ep = db.close_episode(
+        minutes = _arg(parts, 2, DURATION_CHOICES)
+        if minutes is None:
+            await ack()
+            return
+        closed = db.close_episode(
             user_id, episode_id,
             ended_at=ep.started_at + timedelta(minutes=minutes), approx=True,
         )
+        if closed is None:
+            await ack(t(lang, "ep_state_changed"))
+            await _refresh(query, db.get_episode(user_id, episode_id), lang)
+            return
+        ep = closed
         _cancel_reminder(context.job_queue, user_id, episode_id)
         dur = report.human_duration(ep.duration(), lang)
         await ack(t(lang, "ack_approx", dur=dur))
@@ -887,7 +1093,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
     if action == "sh":
-        ep = db.shift_start(user_id, episode_id, int(parts[2]))
+        minutes = _arg(parts, 2, tuple(-m for m in SHIFT_CHOICES))
+        if minutes is None:
+            await ack()
+            return
+        ep = db.shift_start(user_id, episode_id, minutes)
+        if ep is None:
+            await ack(t(lang, "ep_state_changed"))
+            return
         await ack(t(lang, "ack_start_set", time=report.hhmm(ep.started_at)))
         await _refresh(query, ep, lang)
         return
@@ -980,23 +1193,24 @@ def build_app():
     db.init(config.DB_PATH)
     app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("lang", cmd_lang))
-    app.add_handler(CommandHandler("cancel", cmd_cancel))
-    app.add_handler(CommandHandler("log", action_start_episode))
-    app.add_handler(CommandHandler("stop", action_end_episode))
-    app.add_handler(CommandHandler("med", action_med))
-    app.add_handler(CommandHandler("last", cmd_last))
-    app.add_handler(CommandHandler("today", action_today))
-    app.add_handler(CommandHandler("yesterday", cmd_yesterday))
-    app.add_handler(CommandHandler("week", cmd_week))
-    app.add_handler(CommandHandler("month", cmd_month))
-    app.add_handler(CommandHandler("export", action_export))
+    # Только приватные диалоги. В группе бот отвечал бы тому чату, где нажали
+    # кнопку, а данные брал по нажавшему: сосед по группе мог бы спровоцировать
+    # публикацию чужого дневника. Дублирует настройку /setjoingroups в BotFather,
+    # потому что настройка — в одном переключателе от того, чтобы стать неверной.
+    for name, handler in (
+        ("start", cmd_start), ("help", cmd_help), ("lang", cmd_lang),
+        ("cancel", cmd_cancel), ("log", action_start_episode),
+        ("stop", action_end_episode), ("med", action_med), ("last", cmd_last),
+        ("today", action_today), ("yesterday", cmd_yesterday),
+        ("week", cmd_week), ("month", cmd_month), ("export", action_export),
+    ):
+        app.add_handler(CommandHandler(name, handler, filters=PRIVATE))
 
-    app.add_handler(MessageHandler(filters.Text(list(ACTION_BY_TEXT)), on_menu_button))
+    app.add_handler(
+        MessageHandler(filters.Text(list(ACTION_BY_TEXT)) & PRIVATE, on_menu_button)
+    )
     app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & PRIVATE, on_text))
     app.add_error_handler(on_error)
     return app
 

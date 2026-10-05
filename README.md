@@ -108,8 +108,21 @@ more than `RECENT_EPISODE_MIN` minutes ago (3 hours by default).
 ## Privacy
 
 The bot is open to everyone, but diaries are isolated: every record is keyed by
-`user_id`, and another user's episodes can neither be read nor deleted (covered
-by a test). Nothing leaves the machine the bot runs on.
+`user_id`, and another user's episodes can neither be read nor deleted — not even
+with a hand-crafted callback payload (covered by tests). The bot replies in
+private chats only, so a diary cannot be coaxed into a group.
+
+Be clear-eyed about where the data actually lives, though. **It does not stay on
+the bot's machine alone.** Everything you type travels through Telegram and is
+kept in your Telegram chat history, and an exported CSV is uploaded to Telegram's
+file servers — bots cannot use secret chats. On top of that, whoever operates the
+instance holds a plaintext SQLite file with every diary on it. If that is not
+acceptable for your data, run your own instance and be your own operator — that
+is what this repository is for.
+
+Not yet implemented, and worth knowing before you start: there is no "delete
+everything" command (individual episodes can be deleted), no retention limit, and
+no encryption at rest.
 
 ## How data is stored
 
@@ -213,8 +226,10 @@ Things worth knowing:
 - `i18n.py` — every interface string in Russian, English and Portuguese
 - `vocab.py` — codes and labels for symptoms, triggers, severity
 - `config.py` — configuration from `.env`
-- `smoke_test.py` — offline checks of storage, formatting and translations
-- `flow_test.py` — scenario run through the real handlers with a stubbed Telegram
+- `smoke_test.py` — offline checks of storage, formatting, translations, and the
+  hardening invariants (state guards, note limits, CSV escaping)
+- `flow_test.py` — scenario run through the real handlers with a stubbed Telegram,
+  including group chats and hand-crafted callback payloads
 
 Both test suites run during `docker build`.
 

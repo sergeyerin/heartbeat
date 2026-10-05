@@ -244,6 +244,84 @@ def main() -> int:
             check(bool(bot.card_keyboard(approx, code).inline_keyboard),
                   f"карточка-клавиатура собирается на {code}")
 
+        # --- M2: состояние эпизода защищено от повторных действий ---
+        # Инлайн-кнопки живут в истории чата вечно. Старая карточка не должна
+        # перезаписывать уже записанное время окончания.
+        guard = db.start_episode(fuid)
+        db.shift_start(fuid, guard.id, -20)
+        first = db.close_episode(fuid, guard.id)
+        check(first is not None and not first.is_open, "эпизод закрылся")
+        recorded = first.duration()
+        again = db.close_episode(fuid, guard.id)
+        check(again is None, "повторное закрытие отклонено, а не перезаписано")
+        check(db.get_episode(fuid, guard.id).duration() == recorded,
+              "длительность осталась прежней после повторного нажатия")
+        check(db.close_episode(fuid, guard.id, ended_at=db.utcnow(), approx=True) is None,
+              "примерная длительность не затирает точную")
+        check(db.shift_start(fuid, guard.id, -30) is None,
+              "сдвиг начала у закрытого эпизода отклонён")
+        reopened = db.reopen_episode(fuid, guard.id)
+        check(reopened is not None and reopened.is_open, "закрытый эпизод можно открыть")
+        check(db.reopen_episode(fuid, guard.id) is None,
+              "повторное открытие отклонено")
+        # И начало не уезжает в будущее
+        future = db.shift_start(fuid, guard.id, 10 ** 6)
+        check(future.started_at <= db.utcnow(), "сдвиг не уводит начало в будущее")
+        db.delete_episode(fuid, guard.id)
+
+        # --- M5: длина заметки ограничена, карточка остаётся отправляемой ---
+        wordy = db.start_episode(fuid)
+        for _ in range(10):
+            db.append_note(fuid, wordy.id, "я" * 5000)
+        wordy = db.get_episode(fuid, wordy.id)
+        check(len(wordy.note) <= db.MAX_NOTE_TOTAL, f"заметка обрезана до {len(wordy.note)}")
+        check(len(report.episode_card(wordy, LANG)) < 4096,
+              "карточка с огромной заметкой влезает в сообщение")
+        many = [wordy] * 30
+        day_long = report.day_summary(report.today_local(), many, [], LANG)
+        check(all(len(part) <= bot.TG_TEXT_LIMIT for part in bot._split(day_long)),
+              "длинная сводка режется на отправляемые части")
+        check("".join(bot._split(day_long)).replace("\n", "") ==
+              day_long.replace("\n", ""), "при нарезке текст не теряется")
+        check(db.clear_note(fuid, wordy.id).note is None, "заметку можно очистить")
+        db.delete_episode(fuid, wordy.id)
+
+        # Неожиданное значение в колонке тяжести не должно ломать сводку дня:
+        # валидация не пускает такое впредь, но в базе оно могло оказаться раньше.
+        odd = db.start_episode(fuid)
+        db._db().execute("UPDATE episodes SET severity = 7 WHERE id = ?", (odd.id,))
+        db._db().commit()
+        odd = db.get_episode(fuid, odd.id)
+        try:
+            rendered = report.day_summary(report.today_local(), [odd], [], LANG)
+            check(bool(rendered), "сводка дня переживает чужое значение тяжести")
+        except Exception as exc:  # noqa: BLE001
+            check(False, f"сводка дня упала на severity=7: {exc!r}")
+        check(bool(report.episode_card(odd, LANG)), "карточка тоже переживает")
+        db.delete_episode(fuid, odd.id)
+
+        # --- M6: формулы в CSV обезврежены во всех пользовательских колонках ---
+        nasty = db.start_episode(fuid)
+        db.append_note(fuid, nasty.id, '=cmd|\'/c calc\'!A1')
+        db.toggle_code(fuid, nasty.id, "symptoms", "=HYPERLINK(\"http://x\")")
+        db.close_episode(fuid, nasty.id)
+        db.add_med(fuid, "@SUM(1+1)")
+        import csv as _csv
+        import io as _io
+        text = report.episodes_csv(
+            db.all_episodes(fuid), db.all_meds(fuid), LANG
+        ).decode("utf-8-sig")
+        rows = list(_csv.reader(_io.StringIO(text), delimiter=";"))
+        dangerous = [
+            field for row in rows[1:] for field in row
+            if field[:1] in report.CSV_RISKY_PREFIX
+        ]
+        check(not dangerous, f"ни одна ячейка CSV не исполняется в Excel ({dangerous[:2]})")
+        check(any("'=cmd" in field for row in rows for field in row),
+              "содержимое заметки при этом сохранено, только обезврежено")
+        check(len(rows[0]) == len(rows[1]), "колонки не разъехались")
+        db.delete_episode(fuid, nasty.id)
+
         # --- разбор пульса из текста ---
         check(bool(bot.PULSE_RE.match(" 120 ")), "число с пробелами = пульс")
         check(bot.PULSE_RE.match("12.5") is None, "дробное не пульс")
