@@ -326,6 +326,22 @@ def all_open_episodes(stale_after_min: int, limit: int = 500) -> list[Episode]:
     ]
 
 
+def stale_cards_to_refresh(stale_after_min: int, limit: int = 500) -> list[Episode]:
+    """Забытые открытые эпизоды с живой карточкой — чтобы догнать их после
+    рестарта: тик для них не планируется, и их карточка осталась бы висеть на
+    «идёт». Границы и LIMIT в SQL, как у all_open_episodes."""
+    cutoff = _iso(utcnow() - timedelta(minutes=stale_after_min))
+    return [
+        _row_to_episode(r)
+        for r in _db().execute(
+            "SELECT * FROM episodes WHERE ended_at IS NULL AND end_unknown = 0 "
+            "AND card_msg IS NOT NULL AND COALESCE(confirmed_at, started_at) <= ? "
+            "ORDER BY started_at DESC LIMIT ?",
+            (cutoff, limit),
+        ).fetchall()
+    ]
+
+
 def confirm_still_on(user_id: int, episode_id: int) -> Episode | None:
     """«Ещё идёт»: продлевает окно активности, не трогая время начала.
 

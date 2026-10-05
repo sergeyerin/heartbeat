@@ -893,13 +893,7 @@ async def _tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id, chat_id = job.user_id, job.chat_id
     ep = db.get_episode(user_id, job.data["episode_id"])
     lang = _job_lang(user_id)
-    # Останавливаемся, когда обновлять больше нечего или уже нельзя:
-    # закрыт, удалён, забыт (длительность всё равно неизвестна) или сообщение
-    # старше 48 часов — его Telegram править откажется.
     if ep is None or not ep.is_open or ep.card_msg is None:
-        job.schedule_removal()
-        return
-    if ep.needs_end(config.STALE_AFTER_MIN) or ep.duration() > timedelta(hours=47):
         job.schedule_removal()
         return
     # Если открыта панель, перерисовываем ЕЁ: иначе ежеминутное обновление
@@ -913,6 +907,10 @@ async def _tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         markup = duration_panel(ep, lang)
     else:
         markup = card_keyboard(ep, lang)
+    # Перерисовываем В ЛЮБОМ случае, в том числе когда эпизод ТОЛЬКО ЧТО стал
+    # забытым: это тот самый последний кадр, который меняет «идёт, уже N мин»
+    # на «⚠️ окончание не отмечено» с кнопкой «Сколько длилось». Раньше тик
+    # останавливался ДО перерисовки — и карточка застывала на «идёт» навсегда.
     try:
         await context.bot.edit_message_text(
             report.episode_card(ep, lang),
@@ -920,9 +918,12 @@ async def _tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=markup,
         )
     except Exception as exc:
-        if "not modified" in str(exc):
+        if "not modified" not in str(exc):
+            log.warning("Живая карточка #%s больше не правится: %s", ep.id, exc)
+            job.schedule_removal()
             return
-        log.warning("Живая карточка #%s больше не правится: %s", ep.id, exc)
+    # Эпизод забыт или слишком стар — обновлять больше нечего, кадр был последним.
+    if ep.needs_end(config.STALE_AFTER_MIN) or ep.duration() > timedelta(hours=47):
         job.schedule_removal()
 
 
@@ -947,11 +948,41 @@ async def _remind(context: ContextTypes.DEFAULT_TYPE) -> None:
         due = anchor + timedelta(minutes=config.STALE_AFTER_MIN)
         _schedule_reminder(context.job_queue, user_id, ep.id, _until(due), final=True)
         return
-    # Напоминание ЗАМЕНЯЕТ карточку, а не добавляет вторую: раньше в чате
-    # оказывались два сообщения с кнопкой «✅ Отпустило» — живая карточка и
-    # вопрос, — и человек резонно спрашивал, почему их два. Старая карточка
-    # удаляется, вопрос приклеивается к тексту карточки и сам становится ею:
-    # одна интерактивная поверхность на эпизод в любой момент.
+    # Тик и напоминание — больше не два владельца одной карточки. Как только
+    # напоминание берётся за карточку, тик снимается, иначе через минуту он
+    # перерисовал бы её обычной клавиатурой поверх меню вопроса — именно это
+    # мерцание («показалось сообщение, но пропало меню») и видел пользователь.
+    _cancel_tick(context.job_queue, user_id, ep.id)
+    if context.user_data is not None:
+        context.user_data.pop(f"panel:{ep.id}", None)
+
+    if final or stale:
+        # Эпизод стал забытым. Правим карточку НА МЕСТЕ в ту же стальную форму,
+        # что рисуют тик и post_init — одна карточка, один вид, без разрыва и
+        # без второго сообщения. Окно уже уведомило 30 мин назад; молчание и
+        # есть ответ, и тихий переход ему соответствует.
+        if ep.card_msg:
+            try:
+                await context.bot.edit_message_text(
+                    report.episode_card(ep, lang),
+                    chat_id=chat_id, message_id=ep.card_msg,
+                    reply_markup=card_keyboard(ep, lang),
+                )
+                return
+            except Exception as exc:
+                if "not modified" in str(exc):
+                    return
+        # Карточки нет или её уже нельзя править — присылаем стальную заново.
+        sent = await context.bot.send_message(
+            chat_id,
+            report.episode_card(ep, lang),
+            reply_markup=card_keyboard(ep, lang),
+        )
+        db.set_card_msg(user_id, ep.id, sent.message_id)
+        return
+
+    # Окно: это и есть уведомление. Старую карточку удаляем, вопрос приходит
+    # новым сообщением (новое сообщение = пуш), и становится карточкой.
     if ep.card_msg:
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=ep.card_msg)
@@ -961,30 +992,17 @@ async def _remind(context: ContextTypes.DEFAULT_TYPE) -> None:
                     chat_id=chat_id, message_id=ep.card_msg, reply_markup=None)
             except Exception:
                 pass
-    if context.user_data is not None:
-        context.user_data.pop(f"panel:{ep.id}", None)
-    if final or stale:
-        # Вопрос был задан и остался без ответа: эпизод закрывать нечем, время
-        # окончания выдумывать нельзя. Фиксируем как есть и предлагаем указать
-        # длительность по памяти. Больше не напоминаем.
-        sent = await context.bot.send_message(
-            chat_id,
-            report.episode_card(ep, lang) + "\n\n" + t(lang, "remind_stale_tail"),
-            reply_markup=InlineKeyboardMarkup(duration_rows(ep, lang)),
-        )
-        db.set_card_msg(user_id, ep.id, sent.message_id)
-        return
     sent = await context.bot.send_message(
         chat_id,
         report.episode_card(ep, lang) + "\n\n"
         + t(lang, "remind_ask", minutes=config.EPISODE_WINDOW_MIN),
         reply_markup=remind_keyboard(ep, lang),
     )
-    # Тик продолжает идти по этому же сообщению: через минуту он перерисует
-    # его в обычную карточку — вопрос уже доставлен уведомлением, а «не
-    # отвечать» и есть один из ответов (контрольный заход учтёт молчание).
     db.set_card_msg(user_id, ep.id, sent.message_id)
     db.set_remind_stage(user_id, ep.id, 1)
+    # Тик не возобновляем: человека спросили, и до ответа «уже N мин» не
+    # обновляем. «⏳ Ещё идёт» вернёт живое обновление, контрольный заход
+    # учтёт молчание.
     _schedule_reminder(context.job_queue, user_id, ep.id, _window(), final=True)
 
 
@@ -1987,6 +2005,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Человек ответил — цикл вопросов начинается заново.
         db.set_remind_stage(user_id, episode_id, 0)
         _schedule_reminder(context.job_queue, user_id, episode_id, _window())
+        # Живое обновление карточки напоминание снимало — «ещё идёт» его
+        # возвращает: человек снова видит, сколько идёт, не трогая телефон.
+        _schedule_tick(context.job_queue, user_id, episode_id, query.message.chat_id)
         await ack(t(lang, "ack_extended", minutes=config.EPISODE_WINDOW_MIN))
         try:
             await query.edit_message_text(
@@ -2188,6 +2209,25 @@ async def post_init(app) -> None:
             restored += 1
         if restored:
             log.info("Восстановлено напоминаний: %s", restored)
+
+        # Забытые открытые эпизоды в restore НЕ попадают (all_open_episodes их
+        # отсекает), поэтому их живая карточка после рестарта оставалась бы
+        # замороженной на «идёт, уже N мин». Один раз догоняем: правим в
+        # стальную форму. Это и расклеивает карточку, зависшую у пользователя.
+        caught = 0
+        for ep in db.stale_cards_to_refresh(config.STALE_AFTER_MIN):
+            ep_lang = _job_lang(ep.user_id)
+            try:
+                await app.bot.edit_message_text(
+                    report.episode_card(ep, ep_lang),
+                    chat_id=ep.user_id, message_id=ep.card_msg,
+                    reply_markup=card_keyboard(ep, ep_lang),
+                )
+                caught += 1
+            except Exception:
+                pass  # сообщение удалено, слишком старое или уже стальное
+        if caught:
+            log.info("Расклеено забытых карточек: %s", caught)
 
     # Описания команд — на каждом языке плюс дефолтный набор для остальных.
     for lang in i18n.SUPPORTED:

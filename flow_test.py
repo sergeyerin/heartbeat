@@ -203,6 +203,11 @@ def make_context(fake: FakeBot, user_data: dict) -> SimpleNamespace:
                            error=None, job_queue=JQ)
 
 
+async def make_bot_message(fake, chat_id, text):
+    """Сообщение «от бота» с message_id — для подмены живой карточки в тестах."""
+    return await fake.send_message(chat_id, text)
+
+
 def text_update(fake: FakeBot, text: str, user: User = USER) -> Update:
     chat = Chat(id=user.id, type="private")
     msg = Message(message_id=1, date=datetime.now(timezone.utc), chat=chat,
@@ -370,10 +375,17 @@ async def run() -> None:
     db.shift_start(uid, ep.id, -60 * 20)
     db._db().execute("UPDATE episodes SET confirmed_at = NULL WHERE id = ?", (ep.id,))
     db._db().commit()
-    fake.sent.clear()
+    # Карточку запомним: по забытому эпизоду напоминание правит её НА МЕСТЕ
+    # (одна поверхность), а не шлёт второе сообщение.
+    stale_card = db.get_episode(uid, ep.id).card_msg
+    fake.sent.clear(); fake.edited.clear(); fake.deleted.clear()
     await JQ.fire(job, fake)
-    check(any("окончание не отмечено" in m for m in fake.sent),
-          "по забытому эпизоду бот прислал карточку с вопросом о длительности")
+    check(any("окончание не отмечено" in m for m in fake.edited),
+          "по забытому эпизоду карточка стала стальной НА МЕСТЕ")
+    check(stale_card not in fake.deleted,
+          "старую карточку не удаляли — одна поверхность, без мерцания")
+    check(db.get_episode(uid, ep.id).card_msg == stale_card,
+          "та же карточка, не новое сообщение")
     check(job not in JQ.store, "забытый эпизод больше не дёргает напоминаниями")
     check(db.active_episode(uid, cfg.STALE_AFTER_MIN) is None,
           "забытый эпизод перестал считаться текущим")
@@ -1372,6 +1384,48 @@ async def run() -> None:
               for m in fake.sent),
           "переполненный дневник объяснён на входе в ретроспективу")
     cfg.MAX_EPISODES_PER_USER = saved_cap
+
+    # 19o. Застревание на «идёт»: тик по забытому эпизоду должен ПЕРЕРИСОВАТЬ
+    # карточку в стальную и остановиться, а не замереть на «идёт, уже N мин».
+    # (Жалоба: эпизод шёл 2 часа и «сам не закрывался».)
+    while bot._current_episode(uid) is not None:
+        cur = bot._current_episode(uid)
+        db.close_episode(uid, cur.id); age_out(uid, cur.id, days=3)
+    stuck = db.start_episode(uid, started_at=db.utcnow() - timedelta(minutes=125))
+    s_msg = (await make_bot_message(fake, uid, "идёт")).message_id
+    db.set_card_msg(uid, stuck.id, s_msg)
+    stuck_tick = f"tick:{uid}:{stuck.id}"
+    JQ.store[stuck_tick] = {"callback": bot._tick, "interval": timedelta(seconds=60),
+        "first": None, "chat_id": uid, "user_id": uid,
+        "data": {"episode_id": stuck.id}, "name": stuck_tick, "job_kwargs": {},
+        "repeating": True}
+    JQ.user_data = ud
+    fake.edited.clear()
+    alive = await JQ.tick(stuck_tick, fake)
+    check(any("окончание не отмечено" in m for m in fake.edited),
+          "тик перерисовал забытую карточку в стальную, а не заморозил на «идёт»")
+    check(not alive, "и после этого остановился — обновлять больше нечего")
+    db.delete_episode(uid, stuck.id)
+
+    # 19p. Рестарт: забытый эпизод в restore не попадает (all_open_episodes его
+    # отсекает), поэтому post_init должен ОТДЕЛЬНО догнать его карточку —
+    # иначе после редеплоя она висит замороженной навсегда.
+    frozen = db.start_episode(uid, started_at=db.utcnow() - timedelta(minutes=125))
+    f_msg = (await make_bot_message(fake, uid, "идёт, уже 2 ч")).message_id
+    db.set_card_msg(uid, frozen.id, f_msg)
+    check(not any(e.id == frozen.id
+                  for e in db.all_open_episodes(cfg.STALE_AFTER_MIN)),
+          "забытый эпизод НЕ в списке восстановления напоминаний")
+    check(any(e.id == frozen.id
+              for e in db.stale_cards_to_refresh(cfg.STALE_AFTER_MIN)),
+          "но он в списке карточек для догона")
+    fake.edited.clear()
+    await bot.post_init(SimpleNamespace(bot=fake, job_queue=JQ))
+    check(any("окончание не отмечено" in m for m in fake.edited),
+          "post_init расклеил замороженную карточку")
+    check(db.get_episode(uid, frozen.id).card_msg == f_msg,
+          "та же карточка, не новое сообщение")
+    db.delete_episode(uid, frozen.id)
 
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять
