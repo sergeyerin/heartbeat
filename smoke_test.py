@@ -297,6 +297,40 @@ def main() -> int:
         check(not too_long, f"подписи кнопок не обрежутся на телефоне ({too_long[:3]})")
         db.delete_episode(fuid, sample.id)
 
+        # Пары характера ритма: объявление, раскладка и ширина
+        pairs = vocab.SYMPTOM_PAIRS
+        flat = [c for pair in pairs for c in pair]
+        check(all(c in vocab.SYMPTOM_CODES for c in flat),
+              "все парные коды существуют среди симптомов")
+        check(len(flat) == len(set(flat)), "пары не пересекаются")
+        check(all(len(pair) == 2 for pair in pairs), "в паре ровно два ответа")
+        for code in flat:
+            opposite = vocab.sibling(code)
+            check(opposite is not None and vocab.sibling(opposite) == code,
+                  f"пара симметрична: {code} ↔ {opposite}")
+        check(vocab.sibling("short") is None, "непарный код пары не имеет")
+        # Галочка добавляет два символа, поэтому реальный предел для двух в
+        # ряд — 16, а не 18. На этом уже один раз обрезало подпись тяжести.
+        too_wide = [
+            f"{code}/{code_lang}: {vocab.symptoms(code_lang)[code]}"
+            for code_lang in i18n.SUPPORTED for code in flat
+            if len(vocab.symptoms(code_lang)[code]) > 16
+        ]
+        check(not too_wide, f"парные подписи влезают с галочкой ({too_wide[:2]})")
+        board = bot._toggle_keyboard(ep, "sym", LANG).inline_keyboard
+        check(len(board) == 1 + len(pairs) + (len(vocab.SYMPTOM_CODES) - len(flat)),
+              f"пары занимают по ряду на двоих ({len(board)} рядов)")
+        check(all(len(r) == 2 for r in board[1:1 + len(pairs)]),
+              "парные ряды — по две кнопки")
+        check(all(len(r) == 1 for r in board[1 + len(pairs):]),
+              "остальные симптомы по одному: список читают целиком, а не ищут в нём")
+        trg_board = bot._toggle_keyboard(ep, "trg", LANG).inline_keyboard
+        check(all(len(r) == 1 for r in trg_board), "причины все по одному в ряд")
+        check("sex" in vocab.TRIGGER_CODES and "heat" in vocab.TRIGGER_CODES,
+              "близость и баня есть среди причин")
+        check(vocab.TRIGGER_CODES.index("sex") == vocab.TRIGGER_CODES.index("effort") + 1,
+              "близость стоит сразу за нагрузкой — туда её и отправляют по ошибке")
+
         check(i18n.resolve(None, "en-US", "ru") == "en", "en-US → en")
         check(i18n.resolve(None, "pt-BR", "ru") == "ru",
               "неподдерживаемый pt-BR уходит в язык по умолчанию")

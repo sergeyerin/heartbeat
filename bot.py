@@ -313,15 +313,29 @@ def _toggle_keyboard(ep: db.Episode, kind: str, lang: str) -> InlineKeyboardMark
     # «Готово» возвращает в панель, а не на карточку: симптомы и причины —
     # самая частая пара, и ходить за второй через карточку незачем.
     rows = [[InlineKeyboardButton(t(lang, "btn_done"), callback_data=f"rf:{ep.id}")]]
-    rows += [
-        [
-            InlineKeyboardButton(
-                ("✅ " if code in chosen else "") + vocabulary[code],
-                callback_data=f"{prefix}:{ep.id}:{code}",
-            )
-        ]
-        for code in codes
-    ]
+    def button(code: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(
+            ("✅ " if code in chosen else "") + vocabulary[code],
+            callback_data=f"{prefix}:{ep.id}:{code}",
+        )
+
+    # Парные коды идут по два в ряд: пара — это один вопрос с двумя ответами,
+    # и две колонки её именно так и изображают. Остальное по одному: список
+    # симптомов не поиск, а подсказка памяти, и одна колонка даёт один путь
+    # взгляда, где каждый пункт прочитан. Две приглашали бы пропускать.
+    # Принадлежность к паре берём из vocab.PAIRED_CODES, а не из позиции:
+    # перестановка кодов не должна молча ломать раскладку.
+    placed: set[str] = set()
+    for code in codes:
+        if code in placed:
+            continue
+        pair = vocab.PAIRED_CODES.get(code) if kind == "sym" else None
+        if pair and all(c in codes for c in pair):
+            rows.append([button(c) for c in pair])
+            placed.update(pair)
+        else:
+            rows.append([button(code)])
+            placed.add(code)
     return InlineKeyboardMarkup(rows)
 
 
@@ -1552,6 +1566,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await ack()
             return
         ep = db.toggle_code(user_id, episode_id, column, code)
+        # В паре ответы взаимоисключающие: включили один — гасим противоположный.
+        # «Началось резко» и «нарастало» одновременно — не более полный ответ, а
+        # противоречие, и две колонки это уже обещают видом радиокнопок.
+        opposite = vocab.sibling(code) if action == "ts" else None
+        if opposite and code in ep.symptoms and opposite in ep.symptoms:
+            ep = db.toggle_code(user_id, episode_id, column, opposite)
         await ack()
         try:
             await query.edit_message_reply_markup(

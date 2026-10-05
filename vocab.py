@@ -20,17 +20,41 @@ SYMPTOM_CODES = ("irregular", "regular", "abrupt_on", "gradual_on",
                  "skip", "fast", "short", "weak", "dizzy", "chest", "faint",
                  "anxiety", "sweat", "cold", "nausea")
 
-TRIGGER_CODES = ("coffee", "alcohol", "stress", "effort", "food", "nosleep",
-                 "lying", "misseddose", "ill", "unknown")
+# «Близость» и «баня» стоят сразу за «нагрузкой» намеренно, не по частоте:
+# весь смысл их добавления в том, что люди отправляют это в «нагрузку», значит
+# верный ответ должен попадаться глазу следующим.
+TRIGGER_CODES = ("coffee", "alcohol", "stress", "effort", "sex", "heat", "food",
+                 "nosleep", "lying", "misseddose", "ill", "unknown")
+
+# Характер ритма — это три вопроса с двумя ответами каждый. Отсюда и две
+# колонки (пара в ряду = вопрос с двумя ответами), и взаимное исключение:
+# «началось резко» и «нарастало» одновременно — не более полный ответ, а
+# противоречие. Одно объявление задаёт и то, и другое, поэтому они не разъедутся.
+SYMPTOM_PAIRS = (
+    ("irregular", "regular"),
+    ("abrupt_on", "gradual_on"),
+    ("abrupt_off", "gradual_off"),
+)
+
+PAIRED_CODES = {code: pair for pair in SYMPTOM_PAIRS for code in pair}
+
+
+def sibling(code: str) -> str | None:
+    """Противоположный ответ в паре, если код парный."""
+    pair = PAIRED_CODES.get(code)
+    if pair is None:
+        return None
+    return pair[1] if pair[0] == code else pair[0]
+
 
 SYMPTOMS: dict[str, dict[str, str]] = {
     "ru": {
-        "irregular": "неровный пульс, вразнобой",
-        "regular": "ровный, но частый",
-        "abrupt_on": "началось резко, как выключатель",
-        "gradual_on": "нарастало постепенно",
+        "irregular": "пульс вразнобой",
+        "regular": "пульс ровный",
+        "abrupt_on": "началось резко",
+        "gradual_on": "нарастало",
         "abrupt_off": "кончилось резко",
-        "gradual_off": "угасало постепенно",
+        "gradual_off": "угасало",
         "skip": "перебои, замирания",
         "fast": "частое, сильное сердцебиение",
         "short": "одышка",
@@ -44,12 +68,12 @@ SYMPTOMS: dict[str, dict[str, str]] = {
         "nausea": "тошнота",
     },
     "en": {
-        "irregular": "irregular, uneven beat",
-        "regular": "steady but fast",
-        "abrupt_on": "started abruptly, like a switch",
-        "gradual_on": "built up gradually",
-        "abrupt_off": "stopped abruptly",
-        "gradual_off": "faded gradually",
+        "irregular": "irregular pulse",
+        "regular": "steady pulse",
+        "abrupt_on": "sudden start",
+        "gradual_on": "built up slowly",
+        "abrupt_off": "sudden stop",
+        "gradual_off": "faded away",
         "skip": "skipped beats, pauses",
         "fast": "racing or pounding heartbeat",
         "short": "shortness of breath",
@@ -70,6 +94,8 @@ TRIGGERS: dict[str, dict[str, str]] = {
         "alcohol": "алкоголь",
         "stress": "стресс",
         "effort": "нагрузка",
+        "sex": "интимная близость",
+        "heat": "баня, горячий душ",
         "food": "после еды",
         "nosleep": "недосып",
         "lying": "лёжа, ночью",
@@ -82,6 +108,8 @@ TRIGGERS: dict[str, dict[str, str]] = {
         "alcohol": "alcohol",
         "stress": "stress",
         "effort": "physical exertion",
+        "sex": "sexual activity",
+        "heat": "sauna, hot shower",
         "food": "after a meal",
         "nosleep": "lack of sleep",
         "lying": "lying down, at night",

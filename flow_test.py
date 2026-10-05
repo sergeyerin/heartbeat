@@ -1130,6 +1130,29 @@ async def run() -> None:
           "и подделанный payload её не выполняет")
     db.delete_episode(uid, late_ep.id)
 
+    # 19m. Взаимное исключение в паре: ответы противоположны, а не дополняют
+    # друг друга. «Началось резко» и «нарастало» вместе — противоречие.
+    pair_ep = db.start_episode(uid)
+    await press(f"ts:{pair_ep.id}:abrupt_on")
+    check(db.get_episode(uid, pair_ep.id).symptoms == ["abrupt_on"], "первый ответ отмечен")
+    await press(f"ts:{pair_ep.id}:gradual_on")
+    marks = db.get_episode(uid, pair_ep.id).symptoms
+    check(marks == ["gradual_on"], f"противоположный заменил его, а не добавился ({marks})")
+    # Повторное нажатие снимает ответ целиком — поле не становится обязательным
+    await press(f"ts:{pair_ep.id}:gradual_on")
+    check(db.get_episode(uid, pair_ep.id).symptoms == [], "повторное нажатие снимает ответ")
+    # Непарные симптомы по-прежнему независимы
+    for code in ("short", "weak", "dizzy"):
+        await press(f"ts:{pair_ep.id}:{code}")
+    check(set(db.get_episode(uid, pair_ep.id).symptoms) == {"short", "weak", "dizzy"},
+          "непарные симптомы остаются многовыборными")
+    # Исключение не распространяется на причины
+    for code in ("sex", "heat"):
+        await press(f"tt:{pair_ep.id}:{code}")
+    check(set(db.get_episode(uid, pair_ep.id).triggers) == {"sex", "heat"},
+          "причины независимы между собой")
+    db.delete_episode(uid, pair_ep.id)
+
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять
     if db.last_episode(uid) is None:
