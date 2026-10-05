@@ -69,6 +69,9 @@ class FakeBot:
 
     async def edit_message_text(self, text=None, **kwargs):
         self.edited.append(text)
+        # Клавиатуру при правке тоже запоминаем: без этого заглушка скрывала бы
+        # ошибки в кнопках, которые бот ставит через edit, а не через send.
+        self.markups.append(kwargs.get("reply_markup"))
         return True
 
     async def edit_message_reply_markup(self, **kwargs):
@@ -373,9 +376,8 @@ async def run() -> None:
     db.delete_episode(uid, live.id); db.delete_episode(uid, forgotten_long.id)
 
     # 15. Языки: английский и португальский профили Telegram.
-    for code, profile in (("en", "en-GB"), ("pt", "pt-BR")):
-        peer = User(id=100 + len(code) + (0 if code == "en" else 1), first_name="X",
-                    is_bot=False, language_code=profile)
+    for code, profile in (("en", "en-GB"),):
+        peer = User(id=100, first_name="X", is_bot=False, language_code=profile)
         fake.sent.clear(); fake.markups.clear()
         upd = text_update(fake, t(code, "btn_start"), user=peer)
         await bot.on_menu_button(upd, make_context(fake, {}))
@@ -408,13 +410,17 @@ async def run() -> None:
     fake.sent.clear(); fake.edited.clear()
     await bot.cmd_lang(text_update(fake, "/lang", user=german), make_context(fake, {}))
     check(any(t(cfg.DEFAULT_LANG, "lang_prompt") in m for m in fake.sent), "/lang спросил язык")
-    await bot.on_callback(callback_update(fake, "lang:pt", user=german),
+    await bot.on_callback(callback_update(fake, "lang:ru", user=german),
                           make_context(fake, {}))
-    check(db.get_lang(german.id) == "pt", "выбор языка сохранён в БД")
-    check(any(t("pt", "lang_set") in m for m in fake.edited), "подтверждение на новом языке")
+    check(db.get_lang(german.id) == "ru", "выбор языка сохранён в БД")
+    check(any(t("ru", "lang_set") in m for m in fake.edited), "подтверждение на новом языке")
     fake.sent.clear()
     await bot.cmd_help(text_update(fake, "/help", user=german), make_context(fake, {}))
-    check(any("Comandos" in m for m in fake.sent), "дальше бот говорит по-португальски")
+    check(any("Команды" in m for m in fake.sent), "дальше бот говорит по-русски")
+    # Неподдерживаемый код языка ничего не меняет
+    await bot.on_callback(callback_update(fake, "lang:pt", user=german),
+                          make_context(fake, {}))
+    check(db.get_lang(german.id) == "ru", "неподдерживаемый lang:pt язык не сменил")
 
     # 16. M1: бот не работает в группах.
     group = Chat(id=-1001234567890, type="supergroup")
@@ -578,11 +584,16 @@ async def run() -> None:
     db._db().commit()
     stale_probe = db.get_episode(uid, probe.id)
     check(stale_probe.is_stale(cfg.STALE_AFTER_MIN), "эпизод забыт")
-    fake.answers.clear()
+    fake.answers.clear(); fake.edited.clear()
     await press(f"e:{probe.id}")
     check(db.get_episode(uid, probe.id).is_open,
           "«отпустило» на забытом эпизоде не закрыло его ровной длительностью")
-    check(t(LANG, "ep_state_changed") in fake.answers, "и сказало почему")
+    check(any("#" + str(probe.id) in m and "?" in m for m in fake.edited),
+          f"вместо отказа бот спросил длительность ({fake.edited[-1:]})")
+    asked = [b for m in fake.markups if m
+             for row in getattr(m, "inline_keyboard", []) for b in row]
+    check(any(b.callback_data == f"ap:{probe.id}:30" for b in asked),
+          "и сразу предложил варианты длительности")
     # Зато указать длительность по памяти можно
     await press(f"ap:{probe.id}:60")
     done = db.get_episode(uid, probe.id)

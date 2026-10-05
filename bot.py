@@ -1027,6 +1027,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pass
         return
 
+    # «Отпустило» и сдвиг начала на забытом эпизоде: отказывать нечестно —
+    # человек мог отвечать на вопрос бота через час, и для него ничего не
+    # «изменилось». Но и записать «отпустило сейчас» нельзя, это была бы
+    # догадка. Поэтому сразу спрашиваем длительность — это и есть следующий
+    # полезный шаг, а не тупик.
+    if action in NEEDS_ACTIVE and ep.is_open and ep.is_stale(config.STALE_AFTER_MIN):
+        await ack()
+        await _edit_text(
+            query, context,
+            t(lang, "ask_duration_stale", id=ep.id,
+              day=report._day_prefix(ep.started_at, lang),
+              time=report.hhmm(ep.started_at),
+              dur=report.human_duration(ep.duration(), lang)),
+            InlineKeyboardMarkup(duration_rows(ep, lang)),
+        )
+        return
+
     # M2: кнопки живут в истории чата вечно, и старая карточка нарисована в том
     # состоянии, которое было на момент отправки. Применять её действие к
     # эпизоду, который с тех пор изменился, нельзя: так закрытый эпизод получал

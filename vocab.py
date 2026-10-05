@@ -41,18 +41,6 @@ SYMPTOMS: dict[str, dict[str, str]] = {
         "sweat": "sweating",
         "cold": "cold hands/feet",
     },
-    "pt": {
-        "skip": "batimentos falhados, pausas",
-        "fast": "palpitações fortes",
-        "short": "falta de ar",
-        "weak": "fraqueza",
-        "dizzy": "tonturas",
-        "chest": "aperto no peito",
-        "faint": "quase desmaio",
-        "anxiety": "ansiedade",
-        "sweat": "suores",
-        "cold": "mãos/pés frios",
-    },
 }
 
 TRIGGERS: dict[str, dict[str, str]] = {
@@ -78,30 +66,17 @@ TRIGGERS: dict[str, dict[str, str]] = {
         "ill": "illness, cold",
         "unknown": "out of nowhere",
     },
-    "pt": {
-        "coffee": "café",
-        "alcohol": "álcool",
-        "stress": "stress",
-        "effort": "esforço físico",
-        "food": "depois de comer",
-        "nosleep": "falta de sono",
-        "lying": "deitado, à noite",
-        "ill": "doença, gripe",
-        "unknown": "sem motivo aparente",
-    },
 }
 
 SEVERITY: dict[str, dict[int, str]] = {
     "ru": {1: "🙂 терпимо", 2: "😕 средне", 3: "😣 тяжело"},
     "en": {1: "🙂 mild", 2: "😕 moderate", 3: "😣 severe"},
-    "pt": {1: "🙂 leve", 2: "😕 moderado", 3: "😣 forte"},
 }
 
 # Без эмодзи — для CSV, который читает врач или Excel
 SEVERITY_PLAIN: dict[str, dict[int, str]] = {
     "ru": {1: "терпимо", 2: "средне", 3: "тяжело"},
     "en": {1: "mild", 2: "moderate", 3: "severe"},
-    "pt": {1: "leve", 2: "moderado", 3: "forte"},
 }
 
 

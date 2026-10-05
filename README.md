@@ -25,8 +25,8 @@ Just Telegram and a local SQLite file.
 
 ## Languages
 
-Russian, English and Portuguese. The language comes from the Telegram profile
-(`language_code`): `en-GB` → English, `pt-BR` → Portuguese, anything else →
+Russian and English. The language comes from the Telegram profile
+(`language_code`): `en-GB` → English, `ru` → Russian, anything else →
 `DEFAULT_LANG`. `/lang` switches it explicitly, and the choice is stored in the
 database — so it also applies to the reminders the bot sends on its own (those
 have no incoming update to read a profile from) and survives a restart.
@@ -35,6 +35,11 @@ Everything is translated: buttons, cards, daily feeds, reports, symptom and
 trigger names, CSV headers, and the command descriptions in the Telegram menu
 (`set_my_commands` per language). A test guards translation integrity — no key
 and no placeholder can go missing in one of the languages.
+
+Portuguese was built and then removed: with no actual Portuguese-speaking user,
+a third language is a permanent tax on every future change. Adding a language
+back means one entry per key in `i18n.py` plus `vocab.py`; the test will tell you
+exactly what is missing.
 
 ## What gets recorded
 
@@ -211,7 +216,7 @@ Things worth knowing:
 | Variable | Default | Meaning |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — | bot token from @BotFather |
-| `DEFAULT_LANG` | `en` | language for profiles that are not ru/en/pt |
+| `DEFAULT_LANG` | `en` | language for profiles that are not ru/en |
 | `TZ` | `Europe/Moscow` | zone used to display times |
 | `DB_PATH` | `data/heartbeat.db` | SQLite file |
 | `EPISODE_WINDOW_MIN` | `30` | episode window: when to ask "has it stopped?", and how much «⏳ Still ongoing» adds (0 — never ask) |
@@ -223,7 +228,7 @@ Things worth knowing:
 - `bot.py` — handlers, the bottom keyboard, the episode card, inline menus
 - `db.py` — SQLite: the `episodes` / `meds` / `user_prefs` tables and queries
 - `report.py` — card, daily feed, period report, CSV
-- `i18n.py` — every interface string in Russian, English and Portuguese
+- `i18n.py` — every interface string in Russian and English
 - `vocab.py` — codes and labels for symptoms, triggers, severity
 - `config.py` — configuration from `.env`
 - `smoke_test.py` — offline checks of storage, formatting, translations, and the

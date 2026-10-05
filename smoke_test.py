@@ -256,9 +256,10 @@ def main() -> int:
         db.delete_episode(fuid, sample.id)
 
         check(i18n.resolve(None, "en-US", "ru") == "en", "en-US → en")
-        check(i18n.resolve(None, "pt-BR", "ru") == "pt", "pt-BR → pt")
+        check(i18n.resolve(None, "pt-BR", "ru") == "ru",
+              "неподдерживаемый pt-BR уходит в язык по умолчанию")
         check(i18n.resolve(None, "de", "ru") == "ru", "незнакомый язык → дефолт")
-        check(i18n.resolve("pt", "en", "ru") == "pt", "выбор пользователя важнее профиля")
+        check(i18n.resolve("ru", "en", "en") == "ru", "выбор пользователя важнее профиля")
         check(i18n.resolve(None, None, "zz") == i18n.FALLBACK, "битый дефолт → fallback")
 
         # Отчёты и карточки собираются на всех языках без KeyError.
