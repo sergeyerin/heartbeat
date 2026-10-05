@@ -206,12 +206,15 @@ def card_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
     plain = vocab.severity_plain(lang)
     rows = [
         [
-            # У выбранной оценки лицо ЗАМЕНЯЕТСЯ галочкой, а не дополняется ею:
-            # «✅ 🙂 терпимо» — двенадцать символов, и на телефоне подпись
-            # обрезалась до «✅ 🙂 терп…» (видно на скриншоте пользователя).
-            # Замена и короче, и заметнее: лицо исчезает, это видно издалека.
+            # У выбранной оценки лицо заменяется ТОЧКОЙ, а не галочкой: галка
+            # на «средне» стояла рядом с «✅ Отпустило», и это две галки с
+            # разными смыслами на одной карточке — владелец увидел тот же
+            # конфликт, что и с рядом «✅ −N». Теперь грамматика значков
+            # одна на весь продукт: ✅ = «отпустило/закрыто/сохранено»,
+            # ● = «выбрано». Замена лица (а не префикс) сохранена — она
+            # короче и заметнее, лицо исчезает.
             InlineKeyboardButton(
-                f"✅ {plain[level]}" if ep.severity == level else severity[level],
+                f"● {plain[level]}" if ep.severity == level else severity[level],
                 callback_data=f"s:{ep.id}:{level}",
             )
             for level in SEVERITY_LEVELS
@@ -222,7 +225,10 @@ def card_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
                 callback_data=f"p:{ep.id}",
             ),
             InlineKeyboardButton(
-                t(lang, "btn_note") + (" ✅" if ep.note else ""),
+                # Без бейджа «заполнено»: текст карточки прямо над кнопкой и
+                # так показывает заметку, а галка здесь была третьим смыслом
+                # ✅ на одном экране.
+                t(lang, "btn_note"),
                 callback_data=f"n:{ep.id}",
             ),
         ],
@@ -334,7 +340,7 @@ def _toggle_keyboard(ep: db.Episode, kind: str, lang: str) -> InlineKeyboardMark
     rows = [[InlineKeyboardButton(t(lang, "btn_done"), callback_data=f"rf:{ep.id}")]]
     def button(code: str) -> InlineKeyboardButton:
         return InlineKeyboardButton(
-            ("✅ " if code in chosen else "") + vocabulary[code],
+            ("● " if code in chosen else "") + vocabulary[code],
             callback_data=f"{prefix}:{ep.id}:{code}",
         )
 

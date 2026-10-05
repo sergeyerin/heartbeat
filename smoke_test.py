@@ -159,8 +159,12 @@ def main() -> int:
             check(len(rows) <= 4,
                   f"карточка ({name}) не больше четырёх рядов: {len(rows)}")
             labels = [btn.text for r in rows for btn in r]
-            check(sum(1 for x in labels if x.startswith("✅")) <= 1,
-                  f"не больше одной галки на карточке ({name}): {labels}")
+            # Грамматика значков: ✅ только у «Отпустило» (на закрытой карточке
+            # его нет вовсе), выбранное помечается точкой ●. Две галки с
+            # разными смыслами рядом владелец ловил уже дважды.
+            checks_here = [x for x in labels if x.startswith("✅")]
+            check(checks_here == [],
+                  f"на карточке ({name}) нет ни одной галки: {checks_here}")
         fresh_rows = bot.card_keyboard(db.open_episode(fuid) or hung, LANG).inline_keyboard
         check(len(fresh_rows) == 4, f"у идущего эпизода ровно четыре ряда: {len(fresh_rows)}")
         db.delete_episode(fuid, hung.id)
@@ -343,6 +347,25 @@ def main() -> int:
               "близость и баня есть среди причин")
         check(vocab.TRIGGER_CODES.index("sex") == vocab.TRIGGER_CODES.index("effort") + 1,
               "близость стоит сразу за нагрузкой — туда её и отправляют по ошибке")
+
+        # На ИДУЩЕЙ карточке ✅ ровно одна — «Отпустило»; выбранная тяжесть
+        # помечена точкой, а не второй галкой.
+        running_glyph = db.start_episode(fuid)
+        db.set_severity(fuid, running_glyph.id, 2)
+        run_labels = [btn.text for r in
+                      bot.card_keyboard(db.get_episode(fuid, running_glyph.id),
+                                        LANG).inline_keyboard for btn in r]
+        run_checks = [x for x in run_labels if x.startswith("✅")]
+        check(run_checks == [i18n.t(LANG, "btn_end")],
+              f"единственная галка на идущей карточке — «Отпустило»: {run_checks}")
+        check(any(x.startswith("● ") for x in run_labels),
+              "выбранная тяжесть помечена точкой")
+        tog_labels = [btn.text for r in
+                      bot._toggle_keyboard(db.get_episode(fuid, running_glyph.id),
+                                           "sym", LANG).inline_keyboard for btn in r]
+        check(not any(x.startswith("✅") for x in tog_labels),
+              "в меню симптомов выбранное тоже точкой, не галкой")
+        db.delete_episode(fuid, running_glyph.id)
 
         check(i18n.resolve(None, "en-US", "ru") == "en", "en-US → en")
         check(i18n.resolve(None, "pt-BR", "ru") == "ru",
