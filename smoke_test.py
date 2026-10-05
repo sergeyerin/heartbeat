@@ -215,7 +215,7 @@ def main() -> int:
         for code in i18n.SUPPORTED:
             check(len(i18n.months(code)) == 12, f"12 месяцев для {code}")
             check(len(i18n.weekdays(code)) == 7, f"7 дней недели для {code}")
-            check(len(i18n.csv_header(code)) == 12, f"12 колонок CSV для {code}")
+            check(len(i18n.csv_header(code)) == 14, f"14 колонок CSV для {code}")
             check(set(vocab.symptoms(code)) == set(vocab.SYMPTOM_CODES),
                   f"переведены все симптомы для {code}")
             check(set(vocab.triggers(code)) == set(vocab.TRIGGER_CODES),

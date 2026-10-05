@@ -32,10 +32,10 @@ WEEKDAYS = {
 CSV_HEADER = {
     "ru": ["тип", "id", "дата", "начало", "конец", "длительность_мин",
            "длительность_примерная", "тяжесть", "пульс", "симптомы",
-           "перед_эпизодом", "заметка"],
+           "перед_эпизодом", "заметка", "широта", "долгота"],
     "en": ["type", "id", "date", "start", "end", "duration_min",
            "duration_approx", "severity", "pulse", "symptoms",
-           "before_episode", "note"],
+           "before_episode", "note", "latitude", "longitude"],
 }
 
 STRINGS: dict[str, dict[str, str]] = {
@@ -44,6 +44,7 @@ STRINGS: dict[str, dict[str, str]] = {
     "btn_start": {"ru": "⚡️ Аритмия", "en": "⚡️ Arrhythmia"},
     "btn_end": {"ru": "✅ Отпустило", "en": "✅ It stopped"},
     "btn_med": {"ru": "💊 Лекарство", "en": "💊 Medication"},
+    "btn_place": {"ru": "📍 Место", "en": "📍 Place"},
     "btn_today": {"ru": "📋 Сегодня", "en": "📋 Today"},
     "btn_report": {"ru": "📈 Отчёт", "en": "📈 Report"},
     "btn_export": {"ru": "📤 Выгрузить", "en": "📤 Export"},
@@ -378,6 +379,7 @@ STRINGS: dict[str, dict[str, str]] = {
     # --- карточка эпизода ---
     "day_today": {"ru": "сегодня", "en": "today"},
     "day_yesterday": {"ru": "вчера", "en": "yesterday"},
+    "card_open_fresh": {"ru": "⚡️ Эпизод #{id} — идёт", "en": "⚡️ Episode #{id} — ongoing"},
     "card_open": {"ru": "⚡️ Эпизод #{id} — идёт, уже {dur}",
                   "en": "⚡️ Episode #{id} — ongoing, {dur} so far",
 },
@@ -407,6 +409,17 @@ STRINGS: dict[str, dict[str, str]] = {
     "card_triggers": {"ru": "Перед этим: {list}", "en": "Before it: {list}",
 },
     "card_note": {"ru": "Заметка: {text}", "en": "Note: {text}"},
+    "card_place": {"ru": "Место: {link}", "en": "Place: {link}"},
+    "btn_place_clear": {"ru": "📍 Убрать место", "en": "📍 Remove the place"},
+    "place_saved": {"ru": "📍 Место отмечено для эпизода #{id}.",
+                    "en": "📍 Place noted for episode #{id}."},
+    "place_cleared": {"ru": "📍 Место убрано.", "en": "📍 Place removed."},
+    "place_needs_episode": {
+        "ru": "Место привязывается к эпизоду, а сейчас активного нет. "
+              "Отметьте приступ — и пришлите геопозицию снова.",
+        "en": "A place attaches to an episode, and none is running right now. "
+              "Log an episode and send the location again.",
+    },
     "dash": {"ru": "—", "en": "—"},
 
     # --- сводка за день ---

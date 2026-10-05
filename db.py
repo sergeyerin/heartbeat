@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS episodes (
     ended_at   TEXT,                      -- UTC ISO; NULL = эпизод ещё идёт
     end_approx INTEGER NOT NULL DEFAULT 0, -- 1 = длительность указана примерно
     end_unknown INTEGER NOT NULL DEFAULT 0, -- 1 = человек сказал «не знаю»
+    lat        REAL,                       -- где это было, если отметили
+    lon        REAL,
+    card_msg   INTEGER,                    -- id сообщения с живой карточкой
     confirmed_at TEXT,                    -- когда последний раз сказали «ещё идёт»
     severity   INTEGER,                   -- 1 терпимо / 2 средне / 3 тяжело
     pulse      INTEGER,
@@ -88,6 +91,9 @@ class Episode:
     note: str | None = None
     end_approx: bool = False
     end_unknown: bool = False
+    lat: float | None = None
+    lon: float | None = None
+    card_msg: int | None = None
     confirmed_at: datetime | None = None
 
     @property
@@ -162,6 +168,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE episodes ADD COLUMN end_unknown INTEGER NOT NULL DEFAULT 0"
         )
+    if "lat" not in columns:
+        conn.execute("ALTER TABLE episodes ADD COLUMN lat REAL")
+        conn.execute("ALTER TABLE episodes ADD COLUMN lon REAL")
+    if "card_msg" not in columns:
+        conn.execute("ALTER TABLE episodes ADD COLUMN card_msg INTEGER")
 
 
 def _db() -> sqlite3.Connection:
@@ -183,6 +194,9 @@ def _row_to_episode(row: sqlite3.Row) -> Episode:
         note=row["note"],
         end_approx=bool(row["end_approx"]),
         end_unknown=bool(row["end_unknown"]),
+        lat=row["lat"],
+        lon=row["lon"],
+        card_msg=row["card_msg"],
         confirmed_at=_parse(row["confirmed_at"]),
     )
 
@@ -443,6 +457,28 @@ def append_note_dropping_oldest(
     )
     _db().commit()
     return get_episode(user_id, episode_id), dropped
+
+
+def set_card_msg(user_id: int, episode_id: int, message_id: int | None) -> None:
+    """Запоминает сообщение с карточкой, чтобы править его, а не слать новое."""
+    _db().execute(
+        "UPDATE episodes SET card_msg = ? WHERE id = ? AND user_id = ?",
+        (message_id, episode_id, user_id),
+    )
+    _db().commit()
+
+
+def set_place(user_id: int, episode_id: int,
+              lat: float | None, lon: float | None) -> Episode | None:
+    """Координаты эпизода. None/None стирает их — это право пользователя."""
+    cur = _db().execute(
+        "UPDATE episodes SET lat = ?, lon = ? WHERE id = ? AND user_id = ?",
+        (lat, lon, episode_id, user_id),
+    )
+    _db().commit()
+    if cur.rowcount == 0:
+        return None
+    return get_episode(user_id, episode_id)
 
 
 def clear_note(user_id: int, episode_id: int) -> Episode | None:

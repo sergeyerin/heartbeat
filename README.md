@@ -221,6 +221,7 @@ Things worth knowing:
 | `DB_PATH` | `data/heartbeat.db` | SQLite file |
 | `EPISODE_WINDOW_MIN` | `30` | episode window: when to ask "has it stopped?", and how much «⏳ Still ongoing» adds (0 — never ask) |
 | `STALE_AFTER_MIN` | two windows (`60`) | minutes of silence that mean "no end time" |
+| `CARD_TICK_SEC` | `60` | how often the card of an ongoing episode is redrawn (0 — never) |
 | `RECENT_EPISODE_MIN` | `180` | how long after an episode ends plain input still attaches to it |
 
 ## Layout

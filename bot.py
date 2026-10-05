@@ -22,6 +22,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     InputFile,
+    KeyboardButton,
     ReplyKeyboardMarkup,
     Update,
 )
@@ -142,12 +143,19 @@ def _job_lang(user_id: int) -> str:
 # --- клавиатуры ------------------------------------------------------------
 
 def main_keyboard(has_open: bool, lang: str) -> ReplyKeyboardMarkup:
-    """Нижняя плашка. Главная кнопка меняется по состоянию: начать / закрыть."""
+    """Нижняя плашка. Главная кнопка меняется по состоянию: начать / закрыть.
+
+    «📍 Место» — единственная кнопка, которая обязана жить здесь: запросить
+    геопозицию умеет только reply-клавиатура, в инлайновой такого нет.
+    Выгрузка с плашки убрана: она есть командой /export и кнопкой внутри
+    отчёта, а три пути к одному и тому же — лишний ряд на экране.
+    """
     return ReplyKeyboardMarkup(
         [
             [t(lang, "btn_end" if has_open else "btn_start")],
-            [t(lang, "btn_med"), t(lang, "btn_today")],
-            [t(lang, "btn_report"), t(lang, "btn_export")],
+            [t(lang, "btn_med"), KeyboardButton(t(lang, "btn_place"),
+                                                request_location=True)],
+            [t(lang, "btn_today"), t(lang, "btn_report")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -226,6 +234,9 @@ def card_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
         ])
     else:
         rows.append([InlineKeyboardButton(t(lang, "btn_reopen"), callback_data=f"ro:{ep.id}")])
+    if ep.lat is not None:
+        rows.append([InlineKeyboardButton(t(lang, "btn_place_clear"),
+                                          callback_data=f"pc:{ep.id}")])
     rows.append([InlineKeyboardButton(t(lang, "btn_delete"), callback_data=f"d:{ep.id}")])
     return InlineKeyboardMarkup(rows)
 
@@ -429,7 +440,29 @@ async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if ep is None:
         return
     text = (header + "\n\n" if header else "") + report.episode_card(ep, lang)
-    await _send_text(context, update.effective_chat.id, text, card_keyboard(ep, lang))
+    chat_id = update.effective_chat.id
+    # У прежней карточки этого эпизода снимаем кнопки: они живут в истории чата
+    # вечно и нарисованы в старом состоянии — именно через них перезаписывалось
+    # уже записанное время окончания.
+    if ep.card_msg:
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=ep.card_msg, reply_markup=None
+            )
+        except Exception:
+            pass
+    # Длинная карточка уходит частями; кнопки и id для последующих правок —
+    # у последней, рядом с актуальным состоянием.
+    chunks = _split(text)
+    sent = None
+    for index, chunk in enumerate(chunks):
+        sent = await context.bot.send_message(
+            chat_id, chunk,
+            reply_markup=card_keyboard(ep, lang) if index == len(chunks) - 1 else None,
+        )
+    db.set_card_msg(ep.user_id, ep.id, sent.message_id)
+    if ep.is_open:
+        _schedule_tick(context.job_queue, ep.user_id, ep.id, chat_id)
 
 
 async def _refresh(query, ep: db.Episode | None, lang: str,
@@ -462,10 +495,23 @@ def _job_name(user_id: int, episode_id: int) -> str:
 
 
 def _cancel_reminder(job_queue, user_id: int, episode_id: int) -> None:
+    """Снимает ТОЛЬКО напоминание.
+
+    Живое обновление карточки здесь трогать нельзя: `_schedule_reminder`
+    начинается с отмены прежнего напоминания, и если заодно снимать обновление,
+    то планирование напоминания убивало бы только что созданную живую карточку.
+    Для «эпизод перестал идти» есть `_stop_live`.
+    """
     if job_queue is None:
         return
     for job in job_queue.get_jobs_by_name(_job_name(user_id, episode_id)):
         job.schedule_removal()
+
+
+def _stop_live(job_queue, user_id: int, episode_id: int) -> None:
+    """Эпизод перестал идти: не нужны ни напоминание, ни обновление карточки."""
+    _cancel_reminder(job_queue, user_id, episode_id)
+    _cancel_tick(job_queue, user_id, episode_id)
 
 
 def _schedule_reminder(job_queue, user_id: int, episode_id: int, minutes: int,
@@ -496,6 +542,67 @@ def _schedule_reminder(job_queue, user_id: int, episode_id: int, minutes: int,
         data={"episode_id": episode_id, "final": final},
         name=_job_name(user_id, episode_id),
     )
+
+
+def _tick_name(user_id: int, episode_id: int) -> str:
+    return f"tick:{user_id}:{episode_id}"
+
+
+def _cancel_tick(job_queue, user_id: int, episode_id: int) -> None:
+    if job_queue is None:
+        return
+    for job in job_queue.get_jobs_by_name(_tick_name(user_id, episode_id)):
+        job.schedule_removal()
+
+
+def _schedule_tick(job_queue, user_id: int, episode_id: int, chat_id: int) -> None:
+    """Обновлять карточку идущего эпизода раз в минуту.
+
+    Человек видит, сколько уже длится приступ, не трогая телефон. Раз в минуту,
+    а не чаще: секунды в такой записи не нужны, а правка сообщения — это вызов
+    API, и при десятке пользователей частить незачем.
+    """
+    if job_queue is None or config.CARD_TICK_SEC <= 0:
+        return
+    _cancel_tick(job_queue, user_id, episode_id)
+    job_queue.run_repeating(
+        _tick,
+        interval=timedelta(seconds=config.CARD_TICK_SEC),
+        first=timedelta(seconds=config.CARD_TICK_SEC),
+        chat_id=chat_id,
+        user_id=user_id,
+        data={"episode_id": episode_id},
+        name=_tick_name(user_id, episode_id),
+        job_kwargs={"misfire_grace_time": None, "coalesce": True},
+    )
+
+
+async def _tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Перерисовывает живую карточку. Сам себя останавливает, когда пора."""
+    job = context.job
+    user_id, chat_id = job.user_id, job.chat_id
+    ep = db.get_episode(user_id, job.data["episode_id"])
+    lang = _job_lang(user_id)
+    # Останавливаемся, когда обновлять больше нечего или уже нельзя:
+    # закрыт, удалён, забыт (длительность всё равно неизвестна) или сообщение
+    # старше 48 часов — его Telegram править откажется.
+    if ep is None or not ep.is_open or ep.card_msg is None:
+        job.schedule_removal()
+        return
+    if ep.is_stale(config.STALE_AFTER_MIN) or ep.duration() > timedelta(hours=47):
+        job.schedule_removal()
+        return
+    try:
+        await context.bot.edit_message_text(
+            report.episode_card(ep, lang),
+            chat_id=chat_id, message_id=ep.card_msg,
+            reply_markup=card_keyboard(ep, lang),
+        )
+    except Exception as exc:
+        if "not modified" in str(exc):
+            return
+        log.warning("Живая карточка #%s больше не правится: %s", ep.id, exc)
+        job.schedule_removal()
 
 
 async def _remind(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -642,7 +749,7 @@ async def action_end_episode(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
     ep = closed
-    _cancel_reminder(context.job_queue, user_id, episode_id)
+    _stop_live(context.job_queue, user_id, episode_id)
     await update.message.reply_text(
         t(lang, "ep_closed", id=ep.id, dur=report.human_duration(ep.duration(), lang)),
         reply_markup=main_keyboard(False, lang),
@@ -845,6 +952,22 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await _send_card(update, context, ep, lang,
                      _note_header(lang, status, t(lang, "note_appended", id=ep.id)))
+
+
+async def on_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Геопозиция — где был приступ. Привязывается к текущему эпизоду."""
+    user_id = _uid(update)
+    lang = _lang(update)
+    point = update.message.location
+    ep = _current_episode(user_id)
+    if ep is None:
+        await update.message.reply_text(
+            t(lang, "place_needs_episode"),
+            reply_markup=main_keyboard(False, lang),
+        )
+        return
+    ep = db.set_place(user_id, ep.id, point.latitude, point.longitude)
+    await _send_card(update, context, ep, lang, t(lang, "place_saved", id=ep.id))
 
 
 async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1115,6 +1238,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             reply_markup=InlineKeyboardMarkup(rows),
         )
         return
+    if action == "pc":  # убрать место — координаты это данные, их должно быть
+        ep = db.set_place(user_id, episode_id, None, None)  # можно забрать назад
+        await ack(t(lang, "ack_ok"))
+        await _refresh(query, ep, lang, context)
+        return
     if action == "nt":  # дописать, вытеснив самое старое начало заметки
         text = context.user_data.pop(f"note_overflow:{episode_id}", None)
         if not text:
@@ -1195,7 +1323,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _refresh(query, db.get_episode(user_id, episode_id), lang)
             return
         ep = closed
-        _cancel_reminder(context.job_queue, user_id, episode_id)
+        _stop_live(context.job_queue, user_id, episode_id)
         await ack(t(lang, "ack_lasted", dur=report.human_duration(ep.duration(), lang)))
         await _refresh(query, ep, lang)
         # Нижняя плашка меняется только с новым сообщением.
@@ -1276,7 +1404,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _refresh(query, db.get_episode(user_id, episode_id), lang)
             return
         ep = closed
-        _cancel_reminder(context.job_queue, user_id, episode_id)
+        _stop_live(context.job_queue, user_id, episode_id)
         dur = report.human_duration(ep.duration(), lang)
         await ack(t(lang, "ack_approx", dur=dur))
         await _refresh(query, ep, lang)
@@ -1287,7 +1415,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
     if action == "unk":  # окончание так и осталось неизвестным
-        _cancel_reminder(context.job_queue, user_id, episode_id)
+        _stop_live(context.job_queue, user_id, episode_id)
         # Запоминаем ответ, иначе эпизод остаётся в «забытых» и бот напоминает
         # о нём при каждом новом приступе — вечно.
         db.mark_end_unknown(user_id, episode_id)
@@ -1333,7 +1461,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if action == "dy":
         db.delete_episode(user_id, episode_id)
-        _cancel_reminder(context.job_queue, user_id, episode_id)
+        _stop_live(context.job_queue, user_id, episode_id)
         await ack(t(lang, "ack_deleted"))
         await query.edit_message_text(t(lang, "deleted", id=episode_id))
         await context.bot.send_message(
@@ -1393,6 +1521,9 @@ async def post_init(app) -> None:
             due = anchor + timedelta(minutes=config.EPISODE_WINDOW_MIN)
             left = (due - db.utcnow()).total_seconds() / 60
             _schedule_reminder(app.job_queue, ep.user_id, ep.id, max(1, int(left)))
+            if ep.card_msg:
+                # chat_id == user_id: диалог приватный (см. register_handlers)
+                _schedule_tick(app.job_queue, ep.user_id, ep.id, ep.user_id)
             restored += 1
         if restored:
             log.info("Восстановлено напоминаний: %s", restored)
@@ -1434,6 +1565,9 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(on_callback))
     # Файлы не храним, но отвечаем: без этого хендлера присланное фото не
     # попадало ни в один обработчик, и человек получал молчание.
+    app.add_handler(MessageHandler(
+        filters.LOCATION & PRIVATE & filters.UpdateType.MESSAGE, on_location
+    ))
     app.add_handler(MessageHandler(
         (filters.PHOTO | filters.Document.ALL | filters.VIDEO | filters.AUDIO
          | filters.VOICE) & PRIVATE & filters.UpdateType.MESSAGE,

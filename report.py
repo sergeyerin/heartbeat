@@ -95,6 +95,13 @@ def _day_prefix(dt: datetime, lang: str, today: date | None = None) -> str:
     return date_day_month(day, lang)
 
 
+def place_link(ep: Episode) -> str | None:
+    """Ссылка на точку. OpenStreetMap, а не Google: без аккаунта и трекинга."""
+    if ep.lat is None or ep.lon is None:
+        return None
+    return f"https://www.openstreetmap.org/?mlat={ep.lat:.5f}&mlon={ep.lon:.5f}#map=16/{ep.lat:.5f}/{ep.lon:.5f}"
+
+
 # --- карточка эпизода ------------------------------------------------------
 
 def episode_card(ep: Episode, lang: str) -> str:
@@ -107,8 +114,14 @@ def episode_card(ep: Episode, lang: str) -> str:
         lines.append(t(lang, "card_unknown_dur", dur=human_duration(ep.duration(now), lang)))
         lines.append(t(lang, "card_stale_hint"))
     elif ep.is_open:
-        lines.append(t(lang, "card_open", id=ep.id,
-                       dur=human_duration(ep.duration(now), lang)))
+        # Секунды на открытой карточке не нужны: «идёт, уже 6 сек» — это шум,
+        # а карточка всё равно обновляется раз в минуту.
+        elapsed = ep.duration(now)
+        if elapsed < timedelta(minutes=1):
+            lines.append(t(lang, "card_open_fresh", id=ep.id))
+        else:
+            lines.append(t(lang, "card_open", id=ep.id,
+                           dur=human_duration(elapsed, lang)))
         lines.append(t(lang, "card_start", day=_day_prefix(ep.started_at, lang),
                        time=hhmm(ep.started_at)))
     else:
@@ -132,6 +145,9 @@ def episode_card(ep: Episode, lang: str) -> str:
     if ep.triggers:
         lines.append(t(lang, "card_triggers",
                        list=", ".join(vocab.labels(ep.triggers, vocab.triggers(lang)))))
+    link = place_link(ep)
+    if link:
+        lines.append(t(lang, "card_place", link=link))
     if ep.note:
         lines.append(t(lang, "card_note", text=ep.note))
     return "\n".join(lines)
@@ -325,6 +341,8 @@ def episodes_csv(episodes: list[Episode], meds: list[Med], lang: str) -> bytes:
             csv_safe(", ".join(vocab.labels(ep.symptoms, vocab.symptoms(lang)))),
             csv_safe(", ".join(vocab.labels(ep.triggers, vocab.triggers(lang)))),
             csv_safe((ep.note or "").replace("\n", " / ").replace("\r", " ")),
+            f"{ep.lat:.5f}" if ep.lat is not None else "",
+            f"{ep.lon:.5f}" if ep.lon is not None else "",
         ]))
     for med in meds:
         taken = local(med.taken_at)

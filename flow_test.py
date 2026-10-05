@@ -20,6 +20,7 @@ from telegram import (  # noqa: E402
     Chat,
     Document,
     Message,
+    Location,
     MessageEntity,
     PhotoSize,
     Update,
@@ -143,6 +144,13 @@ class FakeJobQueue:
                            "user_id": user_id, "data": data, "name": name,
                            "job_kwargs": job_kwargs or {}}
 
+    def run_repeating(self, callback, interval, first=None, chat_id=None,
+                      user_id=None, data=None, name=None, job_kwargs=None):
+        self.jobs[name] = {"callback": callback, "interval": interval, "first": first,
+                           "chat_id": chat_id, "user_id": user_id, "data": data,
+                           "name": name, "job_kwargs": job_kwargs or {},
+                           "repeating": True}
+
     def get_jobs_by_name(self, name):
         job = self.jobs.get(name)
         return [SimpleNamespace(schedule_removal=lambda n=name: self.jobs.pop(n, None))] if job else []
@@ -152,6 +160,18 @@ class FakeJobQueue:
         spec = self.jobs.pop(name)
         job = SimpleNamespace(data=spec["data"], user_id=spec["user_id"], chat_id=spec["chat_id"])
         await bot._remind(SimpleNamespace(bot=fake, job=job, job_queue=self))
+
+    async def tick(self, name, fake):
+        """Выполняет обновление живой карточки; задача остаётся запланированной."""
+        spec = self.jobs[name]
+        removed = []
+        job = SimpleNamespace(data=spec["data"], user_id=spec["user_id"],
+                              chat_id=spec["chat_id"],
+                              schedule_removal=lambda: removed.append(True))
+        await bot._tick(SimpleNamespace(bot=fake, job=job, job_queue=self))
+        if removed:
+            self.jobs.pop(name, None)
+        return not removed
 
 
 JQ = FakeJobQueue()
@@ -731,6 +751,99 @@ async def run() -> None:
           "на файл приходит объяснение, а не тишина")
     check(db.count_episodes(uid) == before_files,
           "и файл не создаёт эпизодов на пустом месте")
+
+    # 19e. Геопозиция: где был приступ.
+    place_kb = bot.main_keyboard(True, LANG).keyboard
+    place_btn = [b for row in place_kb for b in row
+                 if b.text == t(LANG, "btn_place")]
+    check(place_btn and place_btn[0].request_location,
+          "кнопка места запрашивает геопозицию (это умеет только нижняя плашка)")
+
+    def loc_update(lat=55.751244, lon=37.618423, user=USER):
+        chat = Chat(id=user.id, type="private")
+        msg = Message(message_id=40, date=datetime.now(timezone.utc), chat=chat,
+                      from_user=user, location=Location(latitude=lat, longitude=lon))
+        msg.set_bot(fake)
+        return Update(update_id=40, message=msg)
+
+    takers = [h.callback.__name__ for h in build_handlers()
+              if h.check_update(loc_update()) not in (False, None)]
+    check(takers == ["on_location"], f"геопозиция попадает в свой хендлер ({takers})")
+
+    geo_ep = db.start_episode(uid)
+    fake.sent.clear()
+    await bot.on_location(loc_update(), make_context(fake, {}))
+    stored = db.get_episode(uid, geo_ep.id)
+    check(stored.lat is not None and stored.lon is not None, "координаты записаны")
+    check(any(t(LANG, "place_saved", id=geo_ep.id) in m for m in fake.sent),
+          "бот подтвердил место")
+    card_geo = report.episode_card(stored, LANG)
+    check("openstreetmap.org" in card_geo, "в карточке ссылка на точку")
+    csv_geo = report.episodes_csv([stored], [], LANG).decode("utf-8-sig")
+    check("55.75124" in csv_geo, "координаты попали в выгрузку")
+    # Убрать место можно — координаты это данные, их должно быть можно забрать
+    geo_board = [b for row in bot.card_keyboard(stored, LANG).inline_keyboard for b in row]
+    check(any(b.callback_data == f"pc:{geo_ep.id}" for b in geo_board),
+          "на карточке есть кнопка «убрать место»")
+    await press(f"pc:{geo_ep.id}")
+    check(db.get_episode(uid, geo_ep.id).lat is None, "место убрано по кнопке")
+    # Без активного эпизода бот объясняет, а не молчит
+    while bot._current_episode(uid) is not None:
+        cur = bot._current_episode(uid)
+        db.close_episode(uid, cur.id)
+        age_out(uid, cur.id, days=3)
+    fake.sent.clear()
+    await bot.on_location(loc_update(), make_context(fake, {}))
+    check(any(t(LANG, "place_needs_episode") in m for m in fake.sent),
+          "геопозиция без эпизода: объяснение, а не тишина")
+    db.delete_episode(uid, geo_ep.id)
+
+    # 19f. Живая карточка: обновляется сама, старая перестаёт быть кнопочной.
+    while bot._current_episode(uid) is not None:
+        cur = bot._current_episode(uid)
+        db.close_episode(uid, cur.id)
+        age_out(uid, cur.id, days=3)
+    JQ.jobs.clear(); fake.sent.clear(); fake.edited.clear()
+    await tap(t(LANG, "btn_start"))
+    live = db.active_episode(uid, cfg.STALE_AFTER_MIN)
+    tick_job = f"tick:{uid}:{live.id}"
+    check(tick_job in JQ.jobs, "на идущий эпизод поставлено обновление карточки")
+    check(JQ.jobs[tick_job]["interval"] == timedelta(seconds=cfg.CARD_TICK_SEC),
+          f"интервал обновления {cfg.CARD_TICK_SEC} с, а не каждую секунду")
+    check(db.get_episode(uid, live.id).card_msg is not None,
+          "бот запомнил, какое сообщение править")
+    check(any(t(LANG, "card_open_fresh", id=live.id) in m for m in fake.sent),
+          "свежая карточка без «0 сек»")
+
+    # Прошла минута — карточка показывает длительность
+    db.shift_start(uid, live.id, -3)
+    fake.edited.clear()
+    alive = await JQ.tick(tick_job, fake)
+    check(alive, "задача обновления продолжает жить")
+    check(any("3 мин" in m for m in fake.edited),
+          f"карточка обновилась на месте ({fake.edited[-1:]})")
+
+    # Новая карточка гасит кнопки прежней
+    old_msg = db.get_episode(uid, live.id).card_msg
+    fake.markups.clear()
+    await press(f"s:{live.id}:2")       # любое действие, перерисовывающее карточку
+    await bot._send_card(text_update(fake, "x"), make_context(fake, ud),
+                         db.get_episode(uid, live.id), LANG)
+    check(db.get_episode(uid, live.id).card_msg != old_msg,
+          "карточка переехала в новое сообщение")
+    check(None in fake.markups, "у прежней карточки кнопки сняты")
+
+    # Эпизод закрыт — обновление прекращается
+    await press(f"e:{live.id}")
+    check(tick_job not in JQ.jobs, "после закрытия карточка больше не обновляется")
+    # А если задача всё же сработает — она сама себя снимет
+    JQ.jobs[tick_job] = {"callback": bot._tick, "interval": timedelta(seconds=60),
+                         "first": None, "chat_id": uid, "user_id": uid,
+                         "data": {"episode_id": live.id}, "name": tick_job,
+                         "job_kwargs": {}, "repeating": True}
+    check(not await JQ.tick(tick_job, fake),
+          "задача обновления снимает себя сама на закрытом эпизоде")
+    db.delete_episode(uid, live.id)
 
     # 20. Удаление с подтверждением.
     last_id = db.last_episode(uid).id
