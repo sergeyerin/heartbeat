@@ -10,36 +10,54 @@ from __future__ import annotations
 
 from i18n import FALLBACK
 
-SYMPTOM_CODES = ("skip", "fast", "short", "weak", "dizzy", "chest", "faint",
-                 "anxiety", "sweat", "cold")
+# Характер ритма идёт первым: для кардиолога это самый информативный датум из
+# всего, что пациент может сообщить сам (регулярный или неровный, началось как
+# выключатель или нарастало, кончилось резко или угасло) — по нему различают
+# фибрилляцию, тахикардию и экстрасистолию. Технически это обычные коды
+# симптомов, поэтому меню, агрегатор топа и колонка CSV подхватывают их сами.
+SYMPTOM_CODES = ("irregular", "regular", "abrupt_on", "gradual_on", "abrupt_off",
+                 "skip", "fast", "short", "weak", "dizzy", "chest", "faint",
+                 "anxiety", "sweat", "cold", "nausea")
 
 TRIGGER_CODES = ("coffee", "alcohol", "stress", "effort", "food", "nosleep",
-                 "lying", "ill", "unknown")
+                 "lying", "misseddose", "ill", "unknown")
 
 SYMPTOMS: dict[str, dict[str, str]] = {
     "ru": {
+        "irregular": "неровный пульс, вразнобой",
+        "regular": "ровный, но частый",
+        "abrupt_on": "началось резко, как выключатель",
+        "gradual_on": "нарастало постепенно",
+        "abrupt_off": "кончилось резко",
         "skip": "перебои, замирания",
-        "fast": "сильное сердцебиение",
+        "fast": "частое, сильное сердцебиение",
         "short": "одышка",
         "weak": "слабость",
         "dizzy": "головокружение",
         "chest": "давит в груди",
-        "faint": "предобморок",
-        "anxiety": "тревога",
+        "faint": "темнеет в глазах, предобморок",
+        "anxiety": "тревога, страх",
         "sweat": "потливость",
         "cold": "холодные руки/ноги",
+        "nausea": "тошнота",
     },
     "en": {
+        "irregular": "irregular, uneven beat",
+        "regular": "steady but fast",
+        "abrupt_on": "started abruptly, like a switch",
+        "gradual_on": "built up gradually",
+        "abrupt_off": "stopped abruptly",
         "skip": "skipped beats, pauses",
-        "fast": "pounding heartbeat",
+        "fast": "racing or pounding heartbeat",
         "short": "shortness of breath",
         "weak": "weakness",
         "dizzy": "dizziness",
         "chest": "chest pressure",
-        "faint": "near-fainting",
-        "anxiety": "anxiety",
+        "faint": "feeling I might faint",
+        "anxiety": "anxiety, fear",
         "sweat": "sweating",
         "cold": "cold hands/feet",
+        "nausea": "nausea",
     },
 }
 
@@ -52,7 +70,8 @@ TRIGGERS: dict[str, dict[str, str]] = {
         "food": "после еды",
         "nosleep": "недосып",
         "lying": "лёжа, ночью",
-        "ill": "простуда",
+        "misseddose": "пропустил лекарство",
+        "ill": "болезнь, простуда",
         "unknown": "на ровном месте",
     },
     "en": {
@@ -63,6 +82,7 @@ TRIGGERS: dict[str, dict[str, str]] = {
         "food": "after a meal",
         "nosleep": "lack of sleep",
         "lying": "lying down, at night",
+        "misseddose": "missed a dose",
         "ill": "illness, cold",
         "unknown": "out of nowhere",
     },

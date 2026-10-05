@@ -135,9 +135,11 @@ class FakeJobQueue:
     def __init__(self) -> None:
         self.jobs: dict[str, dict] = {}
 
-    def run_once(self, callback, when, chat_id=None, user_id=None, data=None, name=None):
+    def run_once(self, callback, when, chat_id=None, user_id=None, data=None,
+                 name=None, job_kwargs=None):
         self.jobs[name] = {"callback": callback, "when": when, "chat_id": chat_id,
-                           "user_id": user_id, "data": data, "name": name}
+                           "user_id": user_id, "data": data, "name": name,
+                           "job_kwargs": job_kwargs or {}}
 
     def get_jobs_by_name(self, name):
         job = self.jobs.get(name)
@@ -284,6 +286,9 @@ async def run() -> None:
     check(JQ.jobs[job]["when"] == timedelta(minutes=cfg.EPISODE_WINDOW_MIN),
           f"напоминание через {cfg.EPISODE_WINDOW_MIN} мин")
     check(JQ.jobs[job]["data"].get("final") is False, "это обычный вопрос, не контрольный")
+    # APScheduler по умолчанию выбрасывает задачу, опоздавшую больше секунды
+    check(JQ.jobs[job]["job_kwargs"].get("misfire_grace_time", "missing") is None,
+          "опоздавшее напоминание не выбрасывается планировщиком")
 
     # Сработало напоминание, эпизод ещё идёт.
     await JQ.fire(job, fake)
@@ -660,6 +665,26 @@ async def run() -> None:
           "при равном времени текущим считается последний созданный")
     check(db.open_episode(uid).id == second.id, "то же для open_episode")
     db.delete_episode(uid, first.id); db.delete_episode(uid, second.id)
+
+    # 19b2. «Не знаю» запоминается: иначе бот напоминал бы об этом эпизоде
+    # при каждом новом приступе бесконечно.
+    forgotten_ok = db.start_episode(uid, started_at=db.utcnow() - timedelta(hours=20))
+    check(any(e.id == forgotten_ok.id
+              for e in db.stale_episodes(uid, cfg.STALE_AFTER_MIN)),
+          "забытый эпизод сначала в списке для напоминаний")
+    await press(f"unk:{forgotten_ok.id}")
+    check(db.get_episode(uid, forgotten_ok.id).end_unknown,
+          "ответ «не знаю» записан в базу")
+    check(not any(e.id == forgotten_ok.id
+                  for e in db.stale_episodes(uid, cfg.STALE_AFTER_MIN)),
+          "и бот больше о нём не напоминает")
+    check(db.get_episode(uid, forgotten_ok.id).is_open,
+          "но сам эпизод сохранён, окончание честно неизвестно")
+    # Возврат в работу снимает отметку
+    db.close_episode(uid, forgotten_ok.id)
+    reopened_unk = db.reopen_episode(uid, forgotten_ok.id)
+    check(not reopened_unk.end_unknown, "возврат в работу снимает отметку «не знаю»")
+    db.delete_episode(uid, forgotten_ok.id)
 
     # 19c. Второй рубеж на уровне БД: «ещё идёт» и сдвиг начала отклоняются,
     # если эпизод закрыли в обход функции (второй инстанс на том же файле).

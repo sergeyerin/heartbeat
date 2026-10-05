@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     started_at TEXT    NOT NULL,          -- UTC ISO
     ended_at   TEXT,                      -- UTC ISO; NULL = эпизод ещё идёт
     end_approx INTEGER NOT NULL DEFAULT 0, -- 1 = длительность указана примерно
+    end_unknown INTEGER NOT NULL DEFAULT 0, -- 1 = человек сказал «не знаю»
     confirmed_at TEXT,                    -- когда последний раз сказали «ещё идёт»
     severity   INTEGER,                   -- 1 терпимо / 2 средне / 3 тяжело
     pulse      INTEGER,
@@ -86,6 +87,7 @@ class Episode:
     triggers: list[str] = field(default_factory=list)
     note: str | None = None
     end_approx: bool = False
+    end_unknown: bool = False
     confirmed_at: datetime | None = None
 
     @property
@@ -156,6 +158,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE episodes ADD COLUMN end_approx INTEGER NOT NULL DEFAULT 0")
     if "confirmed_at" not in columns:
         conn.execute("ALTER TABLE episodes ADD COLUMN confirmed_at TEXT")
+    if "end_unknown" not in columns:
+        conn.execute(
+            "ALTER TABLE episodes ADD COLUMN end_unknown INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _db() -> sqlite3.Connection:
@@ -176,6 +182,7 @@ def _row_to_episode(row: sqlite3.Row) -> Episode:
         triggers=_codes(row["triggers"]),
         note=row["note"],
         end_approx=bool(row["end_approx"]),
+        end_unknown=bool(row["end_unknown"]),
         confirmed_at=_parse(row["confirmed_at"]),
     )
 
@@ -233,17 +240,35 @@ def active_episode(user_id: int, stale_after_min: int) -> Episode | None:
 
 
 def stale_episodes(user_id: int, stale_after_min: int) -> list[Episode]:
-    """Открытые эпизоды без отметки окончания — от свежего к старым."""
+    """Открытые эпизоды без отметки окончания — от свежего к старым.
+
+    Эпизоды, по которым человек уже сказал «не знаю», исключены: он ответил
+    на вопрос, и напоминать о них снова — это навязчивость, а принцип проекта
+    в том, чтобы спросить один раз.
+    """
     cutoff = _iso(utcnow() - timedelta(minutes=stale_after_min))
     return [
         _row_to_episode(r)
         for r in _db().execute(
             "SELECT * FROM episodes WHERE user_id = ? AND ended_at IS NULL "
-            "AND COALESCE(confirmed_at, started_at) <= ? "
+            "AND end_unknown = 0 AND COALESCE(confirmed_at, started_at) <= ? "
             "ORDER BY started_at DESC, id DESC",
             (user_id, cutoff),
         ).fetchall()
     ]
+
+
+def mark_end_unknown(user_id: int, episode_id: int) -> Episode | None:
+    """«Не знаю, когда прошло»: факт приступа записан, окончание неизвестно."""
+    cur = _db().execute(
+        "UPDATE episodes SET end_unknown = 1 "
+        "WHERE id = ? AND user_id = ? AND ended_at IS NULL",
+        (episode_id, user_id),
+    )
+    _db().commit()
+    if cur.rowcount == 0:
+        return None
+    return get_episode(user_id, episode_id)
 
 
 def all_open_episodes() -> list[Episode]:
@@ -311,8 +336,8 @@ def close_episode(user_id: int, episode_id: int, ended_at: datetime | None = Non
 def reopen_episode(user_id: int, episode_id: int) -> Episode | None:
     """Возвращает ЗАКРЫТЫЙ эпизод в работу. None, если он и так открыт."""
     cur = _db().execute(
-        "UPDATE episodes SET ended_at = NULL, end_approx = 0, confirmed_at = ? "
-        "WHERE id = ? AND user_id = ? AND ended_at IS NOT NULL",
+        "UPDATE episodes SET ended_at = NULL, end_approx = 0, end_unknown = 0, "
+        "confirmed_at = ? WHERE id = ? AND user_id = ? AND ended_at IS NOT NULL",
         (_iso(utcnow()), episode_id, user_id),
     )
     _db().commit()

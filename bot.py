@@ -237,7 +237,11 @@ def _toggle_keyboard(ep: db.Episode, kind: str, lang: str) -> InlineKeyboardMark
     else:
         codes, vocabulary, prefix = vocab.TRIGGER_CODES, vocab.triggers(lang), "tt"
         chosen = ep.triggers
-    rows = [
+    # «Готово» сверху: список длинный (характер ритма + симптомы), и внизу
+    # кнопка выхода уходит за пределы экрана — меню заменяет карточку на месте,
+    # поэтому другого выхода, кроме этой кнопки, нет.
+    rows = [[InlineKeyboardButton(t(lang, "btn_done"), callback_data=f"c:{ep.id}")]]
+    rows += [
         [
             InlineKeyboardButton(
                 ("✅ " if code in chosen else "") + vocabulary[code],
@@ -246,7 +250,6 @@ def _toggle_keyboard(ep: db.Episode, kind: str, lang: str) -> InlineKeyboardMark
         ]
         for code in codes
     ]
-    rows.append([InlineKeyboardButton(t(lang, "btn_done"), callback_data=f"c:{ep.id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -480,6 +483,13 @@ def _schedule_reminder(job_queue, user_id: int, episode_id: int, minutes: int,
     job_queue.run_once(
         _remind,
         when=timedelta(minutes=minutes),
+        # misfire_grace_time=None — иначе APScheduler берёт свой дефолт в ОДНУ
+        # СЕКУНДУ и просто выбрасывает задачу, опоздавшую больше: цикл событий
+        # занят выгрузкой CSV, контейнер приостановлен, шаг NTP — и вопрос
+        # «отпустило?» не задаётся вообще, а перепланировать его уже некому.
+        # Опоздавшее напоминание не страшно: _remind заново смотрит состояние
+        # эпизода и сам решает, спрашивать или фиксировать как незавершённый.
+        job_kwargs={"misfire_grace_time": None},
         # Бот личный, диалог приватный: chat_id совпадает с user_id.
         chat_id=user_id,
         user_id=user_id,
@@ -1267,6 +1277,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if action == "unk":  # окончание так и осталось неизвестным
         _cancel_reminder(context.job_queue, user_id, episode_id)
+        # Запоминаем ответ, иначе эпизод остаётся в «забытых» и бот напоминает
+        # о нём при каждом новом приступе — вечно.
+        db.mark_end_unknown(user_id, episode_id)
         await ack(t(lang, "ack_ok"))
         try:
             await query.edit_message_text(

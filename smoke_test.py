@@ -180,8 +180,14 @@ def main() -> int:
             for row in markup.inline_keyboard:
                 payloads += [b.callback_data for b in row if b.callback_data]
         check(all(len(p.encode()) <= 64 for p in payloads), "callback_data укладывается в 64 байта")
-        check(len(bot._toggle_keyboard(ep, "sym", LANG).inline_keyboard) == len(vocab.SYMPTOM_CODES) + 1,
+        sym_board = bot._toggle_keyboard(ep, "sym", LANG).inline_keyboard
+        check(len(sym_board) == len(vocab.SYMPTOM_CODES) + 1,
               "в меню симптомов все пункты + «Готово»")
+        check(sym_board[0][0].callback_data == f"c:{ep.id}",
+              "«Готово» первой строкой: меню длинное, снизу кнопка уходит за экран")
+        # Характер ритма — самое информативное для врача, поэтому первым
+        check(sym_board[1][0].callback_data.endswith(":irregular"),
+              "характер ритма предлагается первым")
         check(len(bot._toggle_keyboard(ep, "trg", LANG).inline_keyboard) == len(vocab.TRIGGER_CODES) + 1,
               "в меню причин все пункты + «Готово»")
 
