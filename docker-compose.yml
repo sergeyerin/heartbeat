@@ -1,0 +1,23 @@
+services:
+  heartbeat:
+    container_name: heartbeat-bot
+    build: .
+    image: heartbeat:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Europe/Moscow}
+    # Бот работает long polling'ом: входящих портов нет, нужен только исходящий
+    # трафик к Telegram. network_mode: host — как у остальных ботов на этом VPS.
+    network_mode: host
+    volumes:
+      # Вся история эпизодов живёт здесь. Без volume она исчезнет при пересборке.
+      - ./data:/app/data
+    stop_grace_period: 10s
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
