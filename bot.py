@@ -705,9 +705,15 @@ def _current_episode(user_id: int) -> db.Episode | None:
 
 
 async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                     ep: db.Episode | None, lang: str, header: str = "") -> None:
+                     ep: db.Episode | None, lang: str, header: str = "",
+                     force_new: bool = False) -> None:
     """Отправляет карточку. ``ep`` может быть None: эпизод успели удалить между
-    записью и отправкой — тогда отправлять нечего."""
+    записью и отправкой — тогда отправлять нечего.
+
+    ``force_new`` — переслать карточку ВНИЗ новым сообщением даже без заголовка:
+    нужно, когда последним в чате оказалась служебная реплика, а в списке чатов
+    должно быть видно, что эпизод идёт (превью = последнее сообщение).
+    """
     if ep is None:
         return
     text = (header + "\n\n" if header else "") + report.episode_card(ep, lang)
@@ -715,7 +721,7 @@ async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # Одна карточка на эпизод, а не растущая куча.
     if ep.card_msg:
-        if not header:
+        if not header and not force_new:
             # Нечего сообщать отдельно (например /last) — обновляем живую
             # карточку на месте и не плодим сообщений вообще.
             try:
@@ -1106,10 +1112,20 @@ async def cmd_earlier(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lang = _lang(update)
-    pending = context.user_data.pop("await", None)
+    context.user_data.pop("await", None)
+    context.user_data.pop("pending_note", None)
+    ep = _current_episode(_uid(update))
+    if ep is not None:
+        # Не оставляем «Отменил ввод.» последней репликой: пока идёт эпизод,
+        # последней в чате должна быть его карточка — тогда в списке чатов
+        # видно «идёт, уже N мин», а не служебное сообщение. Карточку шлём
+        # заново вниз (force_new), без текста.
+        await _send_card(update, context, ep, lang, force_new=True)
+        return
+    # Эпизода нет — показывать нечего, короткая реплика с правильной плашкой.
     await update.message.reply_text(
-        t(lang, "cancelled" if pending else "nothing_to_cancel"),
-        reply_markup=main_keyboard(_active(_uid(update)) is not None, lang),
+        t(lang, "nothing_to_cancel"),
+        reply_markup=main_keyboard(False, lang),
     )
 
 
@@ -2199,7 +2215,9 @@ def _commands(lang: str) -> list[BotCommand]:
         BotCommand("export", t(lang, "cmd_export")),
         BotCommand("lang", t(lang, "cmd_lang")),
         BotCommand("forget", t(lang, "cmd_forget")),
-        BotCommand("cancel", t(lang, "cmd_cancel")),
+        # /cancel намеренно НЕ в меню: команда редкая и путает. Остаётся
+        # рабочей (на неё ссылаются подсказки «/cancel — отменить»), но из
+        # списка команд убрана.
         BotCommand("help", t(lang, "cmd_help")),
     ]
 

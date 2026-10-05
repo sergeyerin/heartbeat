@@ -1436,6 +1436,39 @@ async def run() -> None:
           "и меню вернулось к «Аритмия» — эпизод больше не активен")
     db.delete_episode(uid, frozen.id)
 
+    # 19q. /cancel не оставляет «Отменил ввод.» висеть последним: пока идёт
+    # эпизод, последней в чате должна быть его карточка (превью в списке чатов).
+    while bot._current_episode(uid) is not None:
+        cur = bot._current_episode(uid)
+        db.close_episode(uid, cur.id); age_out(uid, cur.id, days=3)
+    await tap(t(LANG, "btn_start"))
+    cancel_ep = db.active_episode(uid, cfg.STALE_AFTER_MIN)
+    # имитируем ожидание ввода (нажали «Пульс»)
+    ud["await"] = {"what": "pulse", "id": cancel_ep.id}
+    old_card = db.get_episode(uid, cancel_ep.id).card_msg
+    fake.sent.clear(); fake.deleted.clear()
+    await bot.cmd_cancel(text_update(fake, "/cancel"), make_context(fake, ud))
+    check("await" not in ud, "ожидание ввода снято")
+    check(not any(t(LANG, "cancelled") in m for m in fake.sent),
+          "нет сообщения «Отменил ввод.»")
+    check(any("идёт" in m for m in fake.sent),
+          "вместо него карточка эпизода прислана вниз")
+    check(old_card in fake.deleted, "прежняя карточка убрана — одна карточка")
+    new_card = db.get_episode(uid, cancel_ep.id).card_msg
+    check(new_card is not None and new_card != old_card,
+          "карточка стала последним сообщением в чате")
+    await press(f"e:{cancel_ep.id}"); db.delete_episode(uid, cancel_ep.id)
+
+    # /cancel без эпизода — короткая реплика, карточку слать неоткуда
+    fake.sent.clear()
+    await bot.cmd_cancel(text_update(fake, "/cancel"), make_context(fake, {}))
+    check(any(t(LANG, "nothing_to_cancel") in m for m in fake.sent),
+          "без эпизода /cancel отвечает коротко")
+
+    # /cancel нет в меню команд — редкая и путает
+    check("cancel" not in [c.command for c in bot._commands(LANG)],
+          "/cancel убрана из списка команд")
+
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять
     if db.last_episode(uid) is None:
