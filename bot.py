@@ -57,6 +57,8 @@ REPORT_PERIODS = (7, 30, 90)
 DAY_NAV_MIN = date(2020, 1, 1)
 SHIFT_CHOICES = (5, 15, 30)
 SEVERITY_LEVELS = (1, 2, 3)
+# Длина названия лекарства — в UTF-16-единицах, как и остальные лимиты
+MED_NAME_LIMIT = 100
 # Варианты для «не помню, когда отпустило»: ставим примерную длительность.
 DURATION_CHOICES = (15, 30, 60, 120, 240, 480)
 
@@ -289,8 +291,10 @@ def _note_header(lang: str, status: str, base: str | None = None) -> str:
 
 
 async def _note_full(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                     ep: db.Episode, lang: str) -> None:
+                     ep: db.Episode | None, lang: str) -> None:
     """Места в заметке не осталось: говорим прямо и даём кнопку очистки."""
+    if ep is None:
+        return
     await context.bot.send_message(
         update.effective_chat.id,
         t(lang, "note_full"),
@@ -317,6 +321,7 @@ def _split(text: str, limit: int = TG_TEXT_LIMIT) -> list[str]:
     if i18n.utf16_len(text) <= limit:
         return [text]
     pieces: list[str] = []
+    current: str | None = None
     for line in text.split("\n"):
         while i18n.utf16_len(line) > limit:
             head = i18n.trim_utf16(line, limit)
@@ -324,14 +329,15 @@ def _split(text: str, limit: int = TG_TEXT_LIMIT) -> list[str]:
             line = line[len(head):]
         pieces.append(line)
     parts: list[str] = []
-    current = ""
     for piece in pieces:
-        if current and i18n.utf16_len(current) + i18n.utf16_len(piece) + 1 > limit:
+        if current is None:
+            current = piece
+        elif i18n.utf16_len(current) + i18n.utf16_len(piece) + 1 > limit:
             parts.append(current)
             current = piece
         else:
-            current = f"{current}\n{piece}" if current else piece
-    if current:
+            current = f"{current}\n{piece}"
+    if current is not None:
         parts.append(current)
     return parts
 
@@ -401,8 +407,12 @@ def _current_episode(user_id: int) -> db.Episode | None:
     return None
 
 
-async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE, ep: db.Episode,
-                     lang: str, header: str = "") -> None:
+async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                     ep: db.Episode | None, lang: str, header: str = "") -> None:
+    """Отправляет карточку. ``ep`` может быть None: эпизод успели удалить между
+    записью и отправкой — тогда отправлять нечего."""
+    if ep is None:
+        return
     text = (header + "\n\n" if header else "") + report.episode_card(ep, lang)
     await _send_text(context, update.effective_chat.id, text, card_keyboard(ep, lang))
 
@@ -760,9 +770,10 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         if kind == "med":
             context.user_data.pop("await", None)
-            db.set_med_name(user_id, target_id, text[:100])
+            name = i18n.trim_utf16(text, MED_NAME_LIMIT)
+            db.set_med_name(user_id, target_id, name)
             await update.message.reply_text(
-                t(lang, "med_saved", name=text[:100]),
+                t(lang, "med_saved", name=name),
                 reply_markup=main_keyboard(_active(user_id) is not None, lang),
             )
             return
@@ -787,7 +798,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if ep is None:
-        context.user_data["pending_note"] = text[:1000]
+        context.user_data["pending_note"] = i18n.trim_utf16(text, db.MAX_NOTE_CHUNK)
         await update.message.reply_text(
             t(lang, "ask_text_as_episode"),
             reply_markup=InlineKeyboardMarkup([[
@@ -882,14 +893,33 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if existing is not None:
             # Эпизод успел начаться другим путём — дописываем в него, а не
             # создаём второй открытый.
-            ep = db.append_note(user_id, existing.id, note)[0] if note else existing
-            await query.edit_message_text(t(lang, "note_appended", id=ep.id))
+            if not note:
+                await query.edit_message_text(t(lang, "ep_already", id=existing.id,
+                                                time=report.hhmm(existing.started_at),
+                                                btn_end=t(lang, "btn_end")))
+                await _send_card(update, context, existing, lang)
+                return
+            ep, status = db.append_note(user_id, existing.id, note)
+            if ep is None:
+                await query.edit_message_text(t(lang, "ep_gone", id=existing.id))
+                return
+            if status == db.NOTE_FULL:
+                # Заметка переполнена: сказать «дописал» было бы неправдой.
+                await query.edit_message_text(t(lang, "note_full"))
+                await _note_full(update, context, ep, lang)
+                return
+            await query.edit_message_text(
+                _note_header(lang, status, t(lang, "note_appended", id=ep.id))
+            )
             await _send_card(update, context, ep, lang)
             return
         ep = db.start_episode(user_id)
+        status = db.NOTE_OK
         if note:
-            ep = db.append_note(user_id, ep.id, note)[0]
-        await query.edit_message_text(t(lang, "ep_recorded", id=ep.id))
+            ep, status = db.append_note(user_id, ep.id, note)
+        await query.edit_message_text(
+            _note_header(lang, status, t(lang, "ep_recorded", id=ep.id))
+        )
         await _send_card(update, context, ep, lang)
         _schedule_reminder(context.job_queue, user_id, ep.id, config.EPISODE_WINDOW_MIN)
         return
@@ -1107,7 +1137,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if action == "go":  # «ещё идёт» — продлеваем окно активности
         was_stale = ep.is_stale(config.STALE_AFTER_MIN)
-        ep = db.confirm_still_on(user_id, episode_id)
+        confirmed = db.confirm_still_on(user_id, episode_id)
+        if confirmed is None:
+            # Эпизод закрыли между выборкой и записью. Ни продлевать, ни
+            # обещать «отмечу окончание» нельзя: отмечать уже нечего.
+            await ack(t(lang, "ep_state_changed"))
+            await _refresh(query, db.get_episode(user_id, episode_id), lang)
+            return
+        ep = confirmed
         _schedule_reminder(context.job_queue, user_id, episode_id, config.EPISODE_WINDOW_MIN)
         await ack(t(lang, "ack_extended", minutes=config.EPISODE_WINDOW_MIN))
         try:

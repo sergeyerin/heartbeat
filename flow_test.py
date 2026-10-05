@@ -474,7 +474,7 @@ async def run() -> None:
     victim = db.start_episode(uid)
 
     def fields(ep):
-        return (ep.started_at, ep.ended_at, ep.severity, ep.pulse,
+        return (ep.started_at, ep.ended_at, ep.confirmed_at, ep.severity, ep.pulse,
                 tuple(ep.symptoms), tuple(ep.triggers), ep.note, ep.end_approx)
 
     before = fields(victim)
@@ -488,8 +488,8 @@ async def run() -> None:
         "e:", "s", "", "dy:999999",
         # Формы, которые пропустила первая версия проверки
         f"m:{victim.id}", f"m:{victim.id}:junk", f"nc:{victim.id}:x",
-        f"go:{victim.id}", f"apm:{victim.id}", f"c:{victim.id}:x",
-        f"mn:{victim.id}:999", "mn:0:0", "mt:0", "md:-1",
+        "go:0", f"go:{victim.id + 10 ** 6}", f"apm:{victim.id}", f"c:{victim.id}:x",
+        f"mn:{10 ** 9}:999", "mn:0:0", "mt:0", "md:-1",
         # Числа, не влезающие в БД: раньше это был необработанный OverflowError
         f"md:{10 ** 30}", f"e:{2 ** 63}", f"dy:{2 ** 64}", f"s:{10 ** 40}:1",
         f"ap:{2 ** 63}:30", "r:" + "9" * 400,
@@ -499,6 +499,10 @@ async def run() -> None:
             await press(data)
         except Exception as exc:  # noqa: BLE001
             check(False, f"подделанный callback уронил хендлер: {data!r} → {exc!r}")
+    fake.edited.clear()
+    await press(f"m:{victim.id}:junk")
+    check(not any(t(LANG, "menu_triggers", id=victim.id) in m for m in fake.edited),
+          "m: с чужим аргументом не открывает меню причин")
     check(db.get_lang(uid) == LANG, "подделанный lang:xx не переключил язык")
     check("await" not in ud,
           f"подделанный callback не захватил ожидание ввода ({ud.get('await')})")
@@ -538,7 +542,10 @@ async def run() -> None:
     check(saved.name == shown[0],
           f"сохранено лекарство с нажатой кнопки ({saved.name!r} == {shown[0]!r})")
 
-    # 19. Проверки состояния на стороне бота (их не исполнял ни один тест).
+    # 19. Проверки состояния: сквозное поведение. Срабатывают два рубежа —
+    # в боте и в SQL, и снаружи они неразличимы (это и есть смысл второго
+    # рубежа). Отличить умеет только проверка «отпустило на забытом»: там
+    # слой БД пропустил бы операцию, а бот — нет.
     probe = db.start_episode(uid)
     await press(f"e:{probe.id}")
     closed_dur = db.get_episode(uid, probe.id).duration()
@@ -582,6 +589,49 @@ async def run() -> None:
     check(not done.is_open and done.end_approx,
           "примерная длительность у забытого эпизода записывается")
     db.delete_episode(uid, probe.id)
+
+    # 19b. Переполненная заметка на пути «записать это как эпизод»: раньше бот
+    # отвечал «дописал», не записав ничего.
+    # Заполняем именно тем текстом, который потом проверяем: отказ зависит от
+    # того, влезает ли конкретное сообщение, а не от «однажды переполнилось».
+    critical = "пульс 210, потерял сознание"
+    full_ep = db.start_episode(uid)
+    while db.append_note(uid, full_ep.id, critical)[1] != db.NOTE_FULL:
+        pass
+    saved_note = db.get_episode(uid, full_ep.id).note
+    ud["pending_note"] = critical
+    fake.edited.clear(); fake.sent.clear()
+    await press("nn")
+    check(db.get_episode(uid, full_ep.id).note == saved_note,
+          "в переполненную заметку ничего не дописалось")
+    check(not any(t(LANG, "note_appended", id=full_ep.id) in m for m in fake.edited),
+          "и бот не соврал, что дописал")
+    check(any(t(LANG, "note_full") in m for m in list(fake.edited) + list(fake.sent)),
+          "бот честно сказал, что заметка заполнена")
+    check(any(t(LANG, "btn_clear_note") == b.text
+              for m in fake.markups if m for row in getattr(m, "inline_keyboard", [])
+              for b in row),
+          "и дал кнопку очистки")
+    # Очистка возвращает возможность писать
+    await press(f"nc:{full_ep.id}")
+    _, st = db.append_note(uid, full_ep.id, "теперь влезает")
+    check(st == db.NOTE_OK and "влезает" in db.get_episode(uid, full_ep.id).note,
+          "после очистки заметка снова пишется")
+    db.delete_episode(uid, full_ep.id)
+
+    # 19c. Второй рубеж на уровне БД: «ещё идёт» и сдвиг начала отклоняются,
+    # если эпизод закрыли в обход функции (второй инстанс на том же файле).
+    raced = db.start_episode(uid)
+    db._db().execute("UPDATE episodes SET ended_at = ? WHERE id = ?",
+                     (db._iso(db.utcnow()), raced.id))
+    db._db().commit()
+    check(db.confirm_still_on(uid, raced.id) is None,
+          "confirm_still_on отклоняет закрытый эпизод")
+    check(db.shift_start(uid, raced.id, -15) is None,
+          "shift_start отклоняет закрытый эпизод")
+    check(db.close_episode(uid, raced.id) is None,
+          "close_episode отклоняет уже закрытый эпизод")
+    db.delete_episode(uid, raced.id)
 
     # 20. Удаление с подтверждением.
     last_id = db.last_episode(uid).id

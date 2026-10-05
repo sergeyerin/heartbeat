@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 import config
 import vocab
 from db import Episode, Med
-from i18n import csv_header, months, t, weekdays
+from i18n import csv_header, months, t, trim_utf16, utf16_len, weekdays
 
 # Границы «времени суток» для гистограммы отчёта
 HOUR_BUCKETS = ((0, 6), (6, 12), (12, 18), (18, 24))
@@ -24,8 +24,9 @@ HOUR_BUCKETS = ((0, 6), (6, 12), (12, 18), (18, 24))
 # любое пользовательское поле обезвреживается апострофом.
 CSV_RISKY_PREFIX = ("=", "+", "-", "@", "\t", "\r")
 
-# Длина заметки в ленте дня: в сводке их может быть много, а лимит сообщения
-# Telegram один на всех. Полный текст виден в карточке эпизода.
+# Длина заметки в ленте дня, в UTF-16-единицах (как считает Telegram): в сводке
+# заметок может быть много, а лимит сообщения один на всех. Полный текст виден
+# в карточке эпизода.
 FEED_NOTE_LIMIT = 200
 
 
@@ -170,8 +171,8 @@ def _episode_line(ep: Episode, now: datetime, lang: str) -> list[str]:
             part = part.strip()
             if not part:
                 continue
-            if len(part) > FEED_NOTE_LIMIT:
-                part = part[:FEED_NOTE_LIMIT] + "…"
+            if utf16_len(part) > FEED_NOTE_LIMIT:
+                part = trim_utf16(part, FEED_NOTE_LIMIT) + "…"
             out.append("    « " + part + " »")
     return out
 

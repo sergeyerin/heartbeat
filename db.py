@@ -66,8 +66,6 @@ _INDEXES = (
 # навсегда. Остаток до 4096 — запас на остальные строки карточки.
 MAX_NOTE_CHUNK = 1000
 MAX_NOTE_TOTAL = 3000
-NOTE_CUT_MARK = " […]"
-
 # Что произошло с заметкой при дописывании
 NOTE_OK = "ok"
 NOTE_CHUNK_TRIMMED = "chunk_trimmed"   # одно сообщение было длиннее лимита

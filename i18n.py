@@ -255,9 +255,11 @@ STRINGS: dict[str, dict[str, str]] = {
                   "pt": "A nota deste episódio está cheia, por isso não acrescentei "
                         "nada — o seu texto não se perdeu, continua no chat. Apague "
                         "a nota com o botão abaixo e envie outra vez."},
-    "note_trimmed": {"ru": "Заметка обрезана: максимум {n} символов.",
-                     "en": "The note was trimmed: {n} characters maximum.",
-                     "pt": "A nota foi cortada: máximo de {n} caracteres."},
+    # Без указания числа: {n} — это UTF-16-единицы, и для эмодзи «1000
+    # символов» было бы неправдой (их влезает 500).
+    "note_trimmed": {"ru": "Сообщение было длинным — сохранил его начало.",
+                     "en": "That message was long — I saved the beginning of it.",
+                     "pt": "A mensagem era longa — guardei o início."},
     "note_appended": {"ru": "📝 Дописал в эпизод #{id}.",
                       "en": "📝 Appended to episode #{id}.",
                       "pt": "📝 Acrescentado ao episódio #{id}."},
@@ -538,6 +540,8 @@ def trim_utf16(text: str, limit: int) -> str:
     Режет по кодовым пунктам (двоичным поиском), поэтому не разрывает
     эмодзи на половинки суррогатной пары.
     """
+    if limit <= 0 or not text:
+        return ""
     if utf16_len(text) <= limit:
         return text
     low, high = 0, len(text)
