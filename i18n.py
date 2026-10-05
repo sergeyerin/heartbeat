@@ -195,6 +195,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "Episode #{id} started {day} at {time}, {dur} ago. I cannot record an "
               "exact end time for it — roughly how long did it last?",
     },
+    "reopen_too_old": {
+        "ru": "Этот эпизод закрыт давно — вернуть его в работу уже нельзя. "
+              "Если приступ снова начался, это новый эпизод.",
+        "en": "This episode was closed a while ago, so it cannot be reopened. "
+              "If the attack started again, that is a new episode.",
+    },
     "ep_state_changed": {"ru": "Эпизод уже в другом состоянии — обновил карточку",
                          "en": "This episode already changed — card refreshed",
 },

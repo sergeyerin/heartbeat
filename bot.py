@@ -233,7 +233,11 @@ def card_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton(t(lang, "btn_shift", minutes=m), callback_data=f"sh:{ep.id}:-{m}")
             for m in SHIFT_CHOICES
         ])
-    else:
+    elif _can_reopen(ep):
+        # «Ещё идёт» — отмена случайного нажатия, а не функция: она стирает
+        # время окончания без возврата. На старом эпизоде это портит данные
+        # (нажатие делает его идущим, и следующее запишет неделю длительности),
+        # поэтому кнопку показываем только пока ошибка правдоподобна.
         rows.append([InlineKeyboardButton(t(lang, "btn_reopen"), callback_data=f"ro:{ep.id}")])
     if ep.lat is not None:
         rows.append([InlineKeyboardButton(t(lang, "btn_place_clear"),
@@ -446,6 +450,13 @@ async def _can_add_episode(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         return False
     return True
+
+
+def _can_reopen(ep: db.Episode) -> bool:
+    """Можно ли вернуть эпизод в работу: только если он закрыт недавно."""
+    if ep.is_open or ep.ended_at is None:
+        return False
+    return (db.utcnow() - ep.ended_at) <= timedelta(minutes=config.RECENT_EPISODE_MIN)
 
 
 def _active(user_id: int) -> db.Episode | None:
@@ -1495,6 +1506,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
     if action == "ro":
+        if not _can_reopen(ep):
+            await ack(t(lang, "reopen_too_old"))
+            await _refresh(query, ep, lang, context)
+            return
         if db.count_open_episodes(user_id) >= config.MAX_OPEN_EPISODES:
             await ack(t(lang, "too_many_open", n=config.MAX_OPEN_EPISODES))
             return

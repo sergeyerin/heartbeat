@@ -999,6 +999,39 @@ async def run() -> None:
     db.close_episode(uid, one.id)
     db.delete_episode(uid, one.id)
 
+    # 19j. Кнопки на закрытом эпизоде: уточнения нужны, «ещё идёт» — нет.
+    fresh_closed = db.start_episode(uid)
+    db.close_episode(uid, fresh_closed.id)
+    fresh_closed = db.get_episode(uid, fresh_closed.id)
+    fresh_btns = [b.callback_data for row in
+                  bot.card_keyboard(fresh_closed, LANG).inline_keyboard for b in row]
+    for needed, why in ((f"s:{fresh_closed.id}:3", "тяжесть"),
+                        (f"p:{fresh_closed.id}", "пульс"),
+                        (f"n:{fresh_closed.id}", "заметка"),
+                        (f"m:{fresh_closed.id}:sym", "симптомы"),
+                        (f"m:{fresh_closed.id}:trg", "причины"),
+                        (f"d:{fresh_closed.id}", "удаление")):
+        check(needed in fresh_btns, f"на закрытом эпизоде остаётся {why}")
+    check(f"ro:{fresh_closed.id}" in fresh_btns,
+          "только что закрытый можно вернуть в работу — это отмена опечатки")
+
+    old_closed = db.start_episode(uid)
+    db.close_episode(uid, old_closed.id)
+    age_out(uid, old_closed.id, days=3)
+    old_closed = db.get_episode(uid, old_closed.id)
+    old_btns = [b.callback_data for row in
+                bot.card_keyboard(old_closed, LANG).inline_keyboard for b in row]
+    check(f"ro:{old_closed.id}" not in old_btns,
+          "на давно закрытом эпизоде «ещё идёт» не предлагается")
+    check(f"s:{old_closed.id}:3" in old_btns,
+          "а уточнения остаются — детали заполняются когда угодно позже")
+    fake.answers.clear()
+    await press(f"ro:{old_closed.id}")
+    check(not db.get_episode(uid, old_closed.id).is_open,
+          "и подделанный payload его не открывает")
+    check(t(LANG, "reopen_too_old") in fake.answers, "с объяснением почему")
+    db.delete_episode(uid, fresh_closed.id); db.delete_episode(uid, old_closed.id)
+
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять
     if db.last_episode(uid) is None:
