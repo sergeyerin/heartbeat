@@ -217,8 +217,17 @@ def main() -> int:
                 payloads += [b.callback_data for b in row if b.callback_data]
         check(all(len(p.encode()) <= 64 for p in payloads), "callback_data укладывается в 64 байта")
         sym_board = bot._toggle_keyboard(ep, "sym", LANG).inline_keyboard
-        check(len(sym_board) == len(vocab.SYMPTOM_CODES) + 1,
-              "в меню симптомов все пункты + «Готово»")
+        # Парные ответы занимают один ряд на двоих, поэтому рядов меньше, чем
+        # кодов: «Готово» + три пары + остальные по одному.
+        expected_rows = 1 + len(vocab.SYMPTOM_PAIRS) + (
+            len(vocab.SYMPTOM_CODES) - 2 * len(vocab.SYMPTOM_PAIRS)
+        )
+        check(len(sym_board) == expected_rows,
+              f"в меню симптомов все пункты + «Готово» ({len(sym_board)} рядов)")
+        shown = {b.callback_data.rsplit(":", 1)[-1]
+                 for row in sym_board[1:] for b in row}
+        check(shown == set(vocab.SYMPTOM_CODES),
+              "и ни один симптом не потерялся при группировке")
         check(sym_board[0][0].callback_data == f"rf:{ep.id}",
               "«Готово» первой строкой и ведёт в панель, а не на карточку")
         # Характер ритма — самое информативное для врача, поэтому первым
