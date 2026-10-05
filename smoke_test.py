@@ -13,6 +13,8 @@ from datetime import timedelta
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "smoke")
 os.environ.setdefault("TZ", "Europe/Moscow")
 
+from telegram import InlineKeyboardMarkup  # noqa: E402
+
 import bot  # noqa: E402
 import db  # noqa: E402
 import i18n  # noqa: E402
@@ -223,6 +225,35 @@ def main() -> int:
               "подписи кнопок уникальны по всем языкам")
         check(len(bot.ACTION_BY_TEXT) == len(bot.MENU_ACTIONS) * len(i18n.SUPPORTED),
               "разбор кнопок покрывает все языки")
+
+        # Telegram делит ряд на равные доли и обрезает подписи: три длинные
+        # подписи в ряд на телефоне превращаются в «⏪ начало…», и −5 не
+        # отличить от −30. Проверяем все клавиатуры на всех языках.
+        ROW_LIMITS = {2: 18, 3: 10}  # максимум символов на кнопку при N в ряду
+        sample = db.start_episode(fuid)
+        stale_sample = db.get_episode(fuid, sample.id)
+        db.shift_start(fuid, sample.id, -60 * 30)
+        too_long = []
+        for code in i18n.SUPPORTED:
+            boards = [
+                bot.card_keyboard(stale_sample, code),
+                bot.card_keyboard(db.get_episode(fuid, sample.id), code),
+                bot.remind_keyboard(stale_sample, code),
+                bot._report_keyboard(7, code),
+                bot._toggle_keyboard(stale_sample, "sym", code),
+                bot._lang_keyboard(),
+                InlineKeyboardMarkup(bot.duration_rows(stale_sample, code)),
+            ]
+            for board in boards:
+                for row in board.inline_keyboard:
+                    limit = ROW_LIMITS.get(len(row))
+                    if limit is None:
+                        continue
+                    for button in row:
+                        if len(button.text) > limit:
+                            too_long.append(f"{code}: {button.text!r} ({len(button.text)}>{limit})")
+        check(not too_long, f"подписи кнопок не обрежутся на телефоне ({too_long[:3]})")
+        db.delete_episode(fuid, sample.id)
 
         check(i18n.resolve(None, "en-US", "ru") == "en", "en-US → en")
         check(i18n.resolve(None, "pt-BR", "ru") == "pt", "pt-BR → pt")

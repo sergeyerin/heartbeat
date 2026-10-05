@@ -59,8 +59,12 @@ STRINGS: dict[str, dict[str, str]] = {
     "btn_note": {"ru": "📝 Заметка", "en": "📝 Note", "pt": "📝 Nota"},
     "btn_symptoms": {"ru": "🫁 Симптомы", "en": "🫁 Symptoms", "pt": "🫁 Sintomas"},
     "btn_triggers": {"ru": "☕️ Перед этим", "en": "☕️ Before it", "pt": "☕️ Antes disto"},
-    "btn_shift": {"ru": "⏪ начало −{minutes} мин", "en": "⏪ start −{minutes} min",
-                  "pt": "⏪ início −{minutes} min"},
+    # Три кнопки в ряд: Telegram делит ряд на равные доли и обрезает лишнее.
+    # С подписью «⏪ начало −15 мин» (16 символов) на телефоне оставалось
+    # «⏪ начало…», и −5 было не отличить от −30. Смысл «сдвинуть начало назад»
+    # несёт сама иконка: другого времени у идущего эпизода ещё нет.
+    "btn_shift": {"ru": "⏪ −{minutes} мин", "en": "⏪ −{minutes} min",
+                  "pt": "⏪ −{minutes} min"},
     "btn_reopen": {"ru": "↩️ Ещё идёт", "en": "↩️ Still ongoing", "pt": "↩️ Ainda a decorrer"},
     "btn_delete": {"ru": "🗑 Удалить", "en": "🗑 Delete", "pt": "🗑 Eliminar"},
     "btn_done": {"ru": "← Готово", "en": "← Done", "pt": "← Pronto"},
