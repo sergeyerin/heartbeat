@@ -18,10 +18,8 @@ os.environ.setdefault("TZ", "Europe/Moscow")
 from telegram import (  # noqa: E402
     CallbackQuery,
     Chat,
-    Document,
     Message,
     MessageEntity,
-    PhotoSize,
     Update,
     User,
 )
@@ -701,70 +699,6 @@ async def run() -> None:
     check(db.close_episode(uid, raced.id) is None,
           "close_episode отклоняет уже закрытый эпизод")
     db.delete_episode(uid, raced.id)
-
-    # 19d. Вложения: присланный файл больше не пропадает в тишину.
-    def file_update(photo=False, name="holter.pdf", user=USER):
-        chat = Chat(id=user.id, type="private")
-        kwargs = {}
-        if photo:
-            kwargs["photo"] = (PhotoSize(file_id="PH", file_unique_id="u1",
-                                         width=90, height=90),)
-        else:
-            kwargs["document"] = Document(file_id="DOC", file_unique_id="u2",
-                                          file_name=name)
-        msg = Message(message_id=30, date=datetime.now(timezone.utc), chat=chat,
-                      from_user=user, **kwargs)
-        msg.set_bot(fake)
-        return Update(update_id=30, message=msg)
-
-    handlers = build_handlers()
-    doc_upd = file_update()
-    takers = [h.callback.__name__ for h in handlers
-              if h.check_update(doc_upd) not in (False, None)]
-    check(takers == ["on_file"], f"документ попадает в хендлер файлов ({takers})")
-    photo_takers = [h.callback.__name__ for h in handlers
-                    if h.check_update(file_update(photo=True)) not in (False, None)]
-    check(photo_takers == ["on_file"], f"фото тоже ({photo_takers})")
-
-    att_ep = db.start_episode(uid)
-    fake.sent.clear()
-    await bot.on_file(doc_upd, make_context(fake, ud))
-    check(db.count_attachments(uid, att_ep.id) == 1, "файл привязан к текущему эпизоду")
-    check(db.list_attachments(uid, att_ep.id)[0].file_name == "holter.pdf",
-          "имя файла сохранено")
-    check(any("#" + str(att_ep.id) in m for m in fake.sent), "бот подтвердил вложение")
-    card_text = report.episode_card(db.get_episode(uid, att_ep.id), LANG, attachments=1)
-    check(t(LANG, "card_files", n=1) in card_text, "в карточке видно вложение")
-
-    # Лимит на эпизод, чтобы карточка не превратилась в простыню
-    for _ in range(db.MAX_ATTACHMENTS_PER_EPISODE + 2):
-        db.add_attachment(uid, att_ep.id, "X", "photo")
-    check(db.count_attachments(uid, att_ep.id) == db.MAX_ATTACHMENTS_PER_EPISODE,
-          f"не больше {db.MAX_ATTACHMENTS_PER_EPISODE} вложений на эпизод")
-
-    # Файл без эпизода: бот предлагает создать и приложить, а не молчит.
-    # Сначала уводим в прошлое ВСЁ, что бот счёл бы текущим: за предыдущие
-    # блоки их накопилось несколько.
-    while bot._current_episode(uid) is not None:
-        current = bot._current_episode(uid)
-        db.close_episode(uid, current.id)
-        age_out(uid, current.id, days=3)
-    ud2b: dict = {}
-    fake.sent.clear(); fake.markups.clear()
-    await bot.on_file(file_update(photo=True), make_context(fake, ud2b))
-    check(any(t(LANG, "file_needs_episode") in m for m in fake.sent),
-          "без эпизода бот объясняет, а не молчит")
-    check(ud2b.get("pending_file") is not None, "файл придержан до подтверждения")
-    before_files = db.count_episodes(uid)
-    await bot.on_callback(callback_update(fake, "nf"), make_context(fake, ud2b))
-    new_ep = db.last_episode(uid)
-    check(db.count_episodes(uid) == before_files + 1, "эпизод создан по подтверждению")
-    check(db.count_attachments(uid, new_ep.id) == 1, "и файл приложен к нему")
-    # Вложения уходят вместе с эпизодом
-    db.delete_episode(uid, new_ep.id)
-    check(db.count_attachments(uid, new_ep.id) == 0,
-          "удаление эпизода уносит вложения")
-    db.delete_episode(uid, att_ep.id)
 
     # 20. Удаление с подтверждением.
     last_id = db.last_episode(uid).id

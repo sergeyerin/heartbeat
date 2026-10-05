@@ -110,26 +110,6 @@ more than `RECENT_EPISODE_MIN` minutes ago (3 hours by default).
   Excel and Google Sheets open it without encoding games). Handy to hand to a
   cardiologist.
 
-## Attachments
-
-Send the bot a photo or a PDF and it attaches to the current episode: a
-photographed ECG strip from a clinic, a Holter report, a blood-pressure monitor
-display, a screenshot of the heart-rate graph from a watch, a discharge summary.
-The card shows the count, the day feed shows it per episode, and the CSV has an
-`attachments` column so the doctor's file says a trace exists.
-
-Telegram keeps the bytes; the bot stores only a `file_id`, so attachments cost
-no disk and need no backup of their own. Up to 20 per episode.
-
-Where an ECG actually comes from is worth knowing before you expect one:
-smartwatch ECG is region- and model-dependent (on Huawei watches check Huawei
-Health → Health for an ECG card), and the reliable sources are a clinic or
-ambulance ECG, a Holter report your cardiologist orders, or a personal
-single-lead recorder (KardiaMobile, Wellue DuoEK and similar) that exports a
-PDF. The last one is what catches a paroxysmal episode *while it is happening*,
-which is the trace a cardiologist usually cannot get. This is device logistics,
-not medical advice — ask your doctor what they actually need.
-
 ## Privacy
 
 The bot is open to everyone, but diaries are isolated: every record is keyed by

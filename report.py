@@ -97,7 +97,7 @@ def _day_prefix(dt: datetime, lang: str, today: date | None = None) -> str:
 
 # --- карточка эпизода ------------------------------------------------------
 
-def episode_card(ep: Episode, lang: str, attachments: int = 0) -> str:
+def episode_card(ep: Episode, lang: str) -> str:
     now = datetime.now(timezone.utc)
     lines = []
     if ep.is_open and ep.is_stale(config.STALE_AFTER_MIN):
@@ -132,8 +132,6 @@ def episode_card(ep: Episode, lang: str, attachments: int = 0) -> str:
     if ep.triggers:
         lines.append(t(lang, "card_triggers",
                        list=", ".join(vocab.labels(ep.triggers, vocab.triggers(lang)))))
-    if attachments:
-        lines.append(t(lang, "card_files", n=attachments))
     if ep.note:
         lines.append(t(lang, "card_note", text=ep.note))
     return "\n".join(lines)
@@ -141,7 +139,7 @@ def episode_card(ep: Episode, lang: str, attachments: int = 0) -> str:
 
 # --- сводка за день --------------------------------------------------------
 
-def _episode_line(ep: Episode, now: datetime, lang: str, attachments: int = 0) -> list[str]:
+def _episode_line(ep: Episode, now: datetime, lang: str) -> list[str]:
     if ep.is_open and ep.is_stale(config.STALE_AFTER_MIN):
         head = t(lang, "line_stale", time=hhmm(ep.started_at))
     elif ep.is_open:
@@ -166,8 +164,6 @@ def _episode_line(ep: Episode, now: datetime, lang: str, attachments: int = 0) -
     if ep.triggers:
         out.append(t(lang, "line_triggers",
                      list=", ".join(vocab.labels(ep.triggers, vocab.triggers(lang)))))
-    if attachments:
-        out.append(t(lang, "line_files", n=attachments))
     if ep.note:
         # Заметка может быть многострочной — отбиваем каждую строку. В ленте
         # показываем начало: полный текст есть в карточке эпизода.
@@ -181,8 +177,7 @@ def _episode_line(ep: Episode, now: datetime, lang: str, attachments: int = 0) -
     return out
 
 
-def day_summary(day: date, episodes: list[Episode], meds: list[Med], lang: str,
-                attachments: dict[int, int] | None = None) -> str:
+def day_summary(day: date, episodes: list[Episode], meds: list[Med], lang: str) -> str:
     now = datetime.now(timezone.utc)
     title = t(lang, "day_title_today") if day == today_local() else day_title(day, lang)
     lines = [t(lang, "day_header", title=title, date=day.strftime("%d.%m.%Y"))]
@@ -199,10 +194,8 @@ def day_summary(day: date, episodes: list[Episode], meds: list[Med], lang: str,
     lines.append("")
 
     # Эпизоды и лекарства — одной лентой по времени.
-    files = attachments or {}
     feed: list[tuple[datetime, list[str]]] = [
-        (ep.started_at, _episode_line(ep, now, lang, files.get(ep.id, 0)))
-        for ep in episodes
+        (ep.started_at, _episode_line(ep, now, lang)) for ep in episodes
     ]
     feed += [
         (m.taken_at, [t(lang, "line_med", time=hhmm(m.taken_at),
@@ -310,14 +303,12 @@ def period_report(days: int, episodes: list[Episode], meds: list[Med], lang: str
 
 # --- экспорт ---------------------------------------------------------------
 
-def episodes_csv(episodes: list[Episode], meds: list[Med], lang: str,
-                 attachments: dict[int, int] | None = None) -> bytes:
+def episodes_csv(episodes: list[Episode], meds: list[Med], lang: str) -> bytes:
     """CSV для врача/Excel. BOM — чтобы Excel не ломал кириллицу и диакритику."""
     buf = io.StringIO()
     writer = csv.writer(buf, delimiter=";")
     writer.writerow(csv_header(lang))
     sev = vocab.severity_plain(lang)
-    files = attachments or {}
     rows: list[tuple[datetime, list]] = []
     for ep in episodes:
         start = local(ep.started_at)
@@ -334,14 +325,12 @@ def episodes_csv(episodes: list[Episode], meds: list[Med], lang: str,
             csv_safe(", ".join(vocab.labels(ep.symptoms, vocab.symptoms(lang)))),
             csv_safe(", ".join(vocab.labels(ep.triggers, vocab.triggers(lang)))),
             csv_safe((ep.note or "").replace("\n", " / ").replace("\r", " ")),
-            files.get(ep.id, 0) or "",
         ]))
     for med in meds:
         taken = local(med.taken_at)
         rows.append((med.taken_at, [
             t(lang, "csv_type_med"), med.id, taken.strftime("%Y-%m-%d"),
-            taken.strftime("%H:%M"), "", "", "", "", "", "", "",
-            csv_safe(med.name or ""), "",
+            taken.strftime("%H:%M"), "", "", "", "", "", "", "", csv_safe(med.name or ""),
         ]))
     for _, row in sorted(rows, key=lambda item: item[0]):
         writer.writerow(row)
