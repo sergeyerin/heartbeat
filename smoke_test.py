@@ -151,9 +151,15 @@ def main() -> int:
 
         # Карточка во всех состояниях укладывается в четыре ряда: она живая,
         # человек к ней возвращается, и текст с кнопками должны влезать вместе
-        for state_ep, name in ((hung, "забытый"), (ep, "закрытый")):
+        # Четыре ряда везде. Исключение одно и намеренное: у НЕДАВНО закрытого
+        # эпизода сверху добавляется ряд правки окончания — он обязан быть на
+        # виду, иначе про него не вспомнят (см. CLAUDE.md).
+        for state_ep, limit, name in ((hung, 4, "забытый"), (ep, 5, "закрытый")):
             rows = bot.card_keyboard(state_ep, LANG).inline_keyboard
-            check(len(rows) <= 4, f"карточка ({name}) не больше четырёх рядов: {len(rows)}")
+            check(len(rows) <= limit,
+                  f"карточка ({name}) не больше {limit} рядов: {len(rows)}")
+        fresh_rows = bot.card_keyboard(db.open_episode(fuid) or hung, LANG).inline_keyboard
+        check(len(fresh_rows) == 4, f"у идущего эпизода ровно четыре ряда: {len(fresh_rows)}")
         db.delete_episode(fuid, hung.id)
 
         check(report.human_duration(timedelta(hours=30), LANG) == "1 дн 6 ч", "длительность: сутки")
