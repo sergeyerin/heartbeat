@@ -15,7 +15,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from i18n import trim_utf16, utf16_len
+from i18n import tail_lines_utf16, trim_utf16, utf16_len
 
 _CREATE_EPISODES = """
 CREATE TABLE IF NOT EXISTS episodes (
@@ -208,7 +208,7 @@ def open_episode(user_id: int) -> Episode | None:
     """
     row = _db().execute(
         "SELECT * FROM episodes WHERE user_id = ? AND ended_at IS NULL "
-        "ORDER BY started_at DESC LIMIT 1",
+        "ORDER BY started_at DESC, id DESC LIMIT 1",
         (user_id,),
     ).fetchone()
     return _row_to_episode(row) if row else None
@@ -226,7 +226,7 @@ def active_episode(user_id: int, stale_after_min: int) -> Episode | None:
     row = _db().execute(
         "SELECT * FROM episodes WHERE user_id = ? AND ended_at IS NULL "
         "AND COALESCE(confirmed_at, started_at) > ? "
-        "ORDER BY started_at DESC LIMIT 1",
+        "ORDER BY started_at DESC, id DESC LIMIT 1",
         (user_id, cutoff),
     ).fetchone()
     return _row_to_episode(row) if row else None
@@ -239,7 +239,8 @@ def stale_episodes(user_id: int, stale_after_min: int) -> list[Episode]:
         _row_to_episode(r)
         for r in _db().execute(
             "SELECT * FROM episodes WHERE user_id = ? AND ended_at IS NULL "
-            "AND COALESCE(confirmed_at, started_at) <= ? ORDER BY started_at DESC",
+            "AND COALESCE(confirmed_at, started_at) <= ? "
+            "ORDER BY started_at DESC, id DESC",
             (user_id, cutoff),
         ).fetchall()
     ]
@@ -383,6 +384,40 @@ def append_note(user_id: int, episode_id: int, text: str) -> tuple[Episode | Non
     )
     _db().commit()
     return get_episode(user_id, episode_id), status
+
+
+NOTE_DROPPED_MARK = "[…]"
+
+
+def append_note_dropping_oldest(
+    user_id: int, episode_id: int, text: str
+) -> tuple[Episode | None, bool]:
+    """Дописывает заметку, вытесняя её самое старое начало.
+
+    Нужно, когда места нет, а записать надо: в дневнике приступов свежая
+    строка («пульс 210, потерял сознание») важнее самой старой. Альтернатива —
+    заставлять человека удалить всё записанное ранее, чтобы записать новое, —
+    для медицинского дневника неверный обмен.
+
+    Возвращает (эпизод, пришлось ли что-то выбросить).
+    """
+    ep = get_episode(user_id, episode_id)
+    if ep is None:
+        return None, False
+    chunk = trim_utf16(text, MAX_NOTE_CHUNK)
+    existing = ep.note or ""
+    if not existing:
+        return append_note(user_id, episode_id, chunk)[0], False
+    room = MAX_NOTE_TOTAL - utf16_len(chunk) - 1 - utf16_len(NOTE_DROPPED_MARK) - 1
+    kept, dropped = tail_lines_utf16(existing, max(room, 0))
+    head = f"{NOTE_DROPPED_MARK}\n{kept}" if dropped and kept else kept
+    note = f"{head}\n{chunk}" if head else chunk
+    _db().execute(
+        "UPDATE episodes SET note = ? WHERE id = ? AND user_id = ?",
+        (note, episode_id, user_id),
+    )
+    _db().commit()
+    return get_episode(user_id, episode_id), dropped
 
 
 def clear_note(user_id: int, episode_id: int) -> Episode | None:

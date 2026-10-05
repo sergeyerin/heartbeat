@@ -291,16 +291,26 @@ def _note_header(lang: str, status: str, base: str | None = None) -> str:
 
 
 async def _note_full(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                     ep: db.Episode | None, lang: str) -> None:
-    """Места в заметке не осталось: говорим прямо и даём кнопку очистки."""
+                     ep: db.Episode | None, lang: str, text: str) -> None:
+    """Места в заметке не осталось.
+
+    Текст остаётся у бота, и первая кнопка его СОХРАНЯЕТ, вытесняя самое старое
+    начало заметки. Предлагать «очистите всё и пришлите заново» единственным
+    действием нельзя: человек, делающий ровно то, что написано, уничтожал
+    записанные симптомы, а присланный заново текст уезжал в новый, выдуманный
+    эпизод, потому что ожидание ввода к тому моменту уже снималось.
+    """
     if ep is None:
         return
+    context.user_data[f"note_overflow:{ep.id}"] = text
     await context.bot.send_message(
         update.effective_chat.id,
         t(lang, "note_full"),
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton(t(lang, "btn_clear_note"), callback_data=f"nc:{ep.id}")
-        ]]),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(t(lang, "btn_note_push"), callback_data=f"nt:{ep.id}")],
+            [InlineKeyboardButton(t(lang, "btn_clear_note"), callback_data=f"nc:{ep.id}")],
+            [InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="nx")],
+        ]),
     )
 
 
@@ -325,6 +335,8 @@ def _split(text: str, limit: int = TG_TEXT_LIMIT) -> list[str]:
     for line in text.split("\n"):
         while i18n.utf16_len(line) > limit:
             head = i18n.trim_utf16(line, limit)
+            if not head:  # лимит меньше одного символа — дальше не разрезать
+                break
             pieces.append(head)
             line = line[len(head):]
         pieces.append(line)
@@ -417,7 +429,8 @@ async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
     await _send_text(context, update.effective_chat.id, text, card_keyboard(ep, lang))
 
 
-async def _refresh(query, ep: db.Episode | None, lang: str) -> None:
+async def _refresh(query, ep: db.Episode | None, lang: str,
+                   context: ContextTypes.DEFAULT_TYPE | None = None) -> None:
     """Перерисовывает карточку на месте. Повторное нажатие той же кнопки даёт
     тот же текст — Telegram отвечает 'message is not modified', это не ошибка.
 
@@ -430,8 +443,15 @@ async def _refresh(query, ep: db.Episode | None, lang: str) -> None:
             report.episode_card(ep, lang), reply_markup=card_keyboard(ep, lang)
         )
     except Exception as exc:
-        if "not modified" not in str(exc):
-            log.warning("Не удалось обновить карточку #%s: %s", ep.id, exc)
+        if "not modified" in str(exc):
+            return
+        log.warning("Не удалось обновить карточку #%s: %s", ep.id, exc)
+        # Сообщение старше 48 часов правке не поддаётся. Молча проглотить
+        # нельзя: всплывающая подсказка уже сказала «обновил карточку», и
+        # человек остался бы с неработающей кнопкой и без объяснений.
+        if context is not None:
+            await _send_text(context, query.message.chat_id,
+                             report.episode_card(ep, lang), card_keyboard(ep, lang))
 
 
 def _job_name(user_id: int, episode_id: int) -> str:
@@ -764,7 +784,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if ep is None:
                 await update.message.reply_text(t(lang, "ep_gone", id=target_id))
             elif status == db.NOTE_FULL:
-                await _note_full(update, context, ep, lang)
+                await _note_full(update, context, ep, lang, text)
             else:
                 await _send_card(update, context, ep, lang, _note_header(lang, status))
             return
@@ -798,7 +818,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if ep is None:
-        context.user_data["pending_note"] = i18n.trim_utf16(text, db.MAX_NOTE_CHUNK)
+        # Не обрезаем здесь: обрезку делает append_note и сообщает о ней.
+        # Размер уже ограничен лимитом сообщения Telegram.
+        context.user_data["pending_note"] = text
         await update.message.reply_text(
             t(lang, "ask_text_as_episode"),
             reply_markup=InlineKeyboardMarkup([[
@@ -809,7 +831,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     ep, status = db.append_note(user_id, ep.id, text)
     if status == db.NOTE_FULL:
-        await _note_full(update, context, ep, lang)
+        await _note_full(update, context, ep, lang, text)
         return
     await _send_card(update, context, ep, lang,
                      _note_header(lang, status, t(lang, "note_appended", id=ep.id)))
@@ -906,7 +928,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if status == db.NOTE_FULL:
                 # Заметка переполнена: сказать «дописал» было бы неправдой.
                 await query.edit_message_text(t(lang, "note_full"))
-                await _note_full(update, context, ep, lang)
+                await _note_full(update, context, ep, lang, note)
                 return
             await query.edit_message_text(
                 _note_header(lang, status, t(lang, "note_appended", id=ep.id))
@@ -1011,13 +1033,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # новое время окончания, а длительность 20 минут превращалась в 2 часа.
     if action in NEEDS_OPEN and not ep.is_open:
         await ack(t(lang, "ep_state_changed"))
-        await _refresh(query, ep, lang)
+        await _refresh(query, ep, lang, context)
         return
     if action in NEEDS_ACTIVE and (
         not ep.is_open or ep.is_stale(config.STALE_AFTER_MIN)
     ):
         await ack(t(lang, "ep_state_changed"))
-        await _refresh(query, ep, lang)
+        await _refresh(query, ep, lang, context)
         return
     if action in NEEDS_CLOSED and ep.is_open:
         await ack(t(lang, "ep_state_changed"))
@@ -1055,15 +1077,41 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             reply_markup=InlineKeyboardMarkup(rows),
         )
         return
-    if action == "nc":
-        context.user_data.pop("await", None)
-        ep = db.clear_note(user_id, episode_id)
-        await ack(t(lang, "ack_ok"))
+    if action == "nt":  # дописать, вытеснив самое старое начало заметки
+        text = context.user_data.pop(f"note_overflow:{episode_id}", None)
+        if not text:
+            await ack(t(lang, "note_lost_text"))
+            context.user_data["await"] = {"what": "note", "id": episode_id}
+            await query.edit_message_text(t(lang, "note_lost_text"))
+            return
+        updated, dropped = db.append_note_dropping_oldest(user_id, episode_id, text)
+        await ack(t(lang, "ack_saved"))
         try:
-            await query.edit_message_text(t(lang, "note_cleared"))
+            await query.edit_message_text(
+                t(lang, "note_pushed" if dropped else "note_saved")
+            )
         except Exception:
             pass
-        await _send_card(update, context, ep, lang)
+        await _send_card(update, context, updated, lang)
+        return
+    if action == "nc":
+        pending_text = context.user_data.pop(f"note_overflow:{episode_id}", None)
+        cleared = db.clear_note(user_id, episode_id)
+        if pending_text:
+            # Очистили, чтобы освободить место под уже присланный текст — сразу
+            # его и записываем, а не просим прислать заново (и не отправляем
+            # человека в диалог «записать как новый эпизод?»).
+            cleared, _ = db.append_note(user_id, episode_id, pending_text)
+        else:
+            context.user_data.pop("await", None)
+        await ack(t(lang, "ack_ok"))
+        try:
+            await query.edit_message_text(
+                t(lang, "note_saved" if pending_text else "note_cleared")
+            )
+        except Exception:
+            pass
+        await _send_card(update, context, cleared, lang)
         return
     if action == "m":
         kind = parts[2] if len(parts) > 2 else ""

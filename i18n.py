@@ -246,15 +246,21 @@ STRINGS: dict[str, dict[str, str]] = {
                    "pt": "📝 Nota adicionada."},
     "note_cleared": {"ru": "📝 Заметка очищена.", "en": "📝 Note cleared.",
                      "pt": "📝 Nota apagada."},
-    "note_full": {"ru": "Заметка эпизода заполнена, поэтому я ничего не дописал — "
-                        "ваш текст не потерян, он остался в чате. Очистите заметку "
-                        "кнопкой ниже и пришлите заново.",
-                  "en": "This episode's note is full, so I appended nothing — your "
-                        "text is not lost, it is still in the chat. Clear the note "
-                        "with the button below and send it again.",
-                  "pt": "A nota deste episódio está cheia, por isso não acrescentei "
-                        "nada — o seu texto não se perdeu, continua no chat. Apague "
-                        "a nota com o botão abaixo e envie outra vez."},
+    "note_full": {"ru": "Заметка эпизода заполнена, поэтому я пока ничего не "
+                        "дописал. Ваш текст у меня — выберите, что с ним сделать.",
+                  "en": "This episode's note is full, so I have appended nothing "
+                        "yet. I still have your text — choose what to do with it.",
+                  "pt": "A nota deste episódio está cheia, por isso ainda não "
+                        "acrescentei nada. Tenho o seu texto — escolha o que fazer."},
+    "btn_note_push": {"ru": "📌 Дописать, убрав начало",
+                      "en": "📌 Append, drop the oldest",
+                      "pt": "📌 Acrescentar, apagar o início"},
+    "note_pushed": {"ru": "📝 Дописал. Самое старое начало заметки пришлось убрать.",
+                    "en": "📝 Appended. The oldest part of the note had to go.",
+                    "pt": "📝 Acrescentado. A parte mais antiga da nota foi removida."},
+    "note_lost_text": {"ru": "Текст уже не у меня — пришлите его снова.",
+                       "en": "I no longer have that text — please send it again.",
+                       "pt": "Já não tenho esse texto — envie-o outra vez."},
     # Без указания числа: {n} — это UTF-16-единицы, и для эмодзи «1000
     # символов» было бы неправдой (их влезает 500).
     "note_trimmed": {"ru": "Сообщение было длинным — сохранил его начало.",
@@ -552,6 +558,20 @@ def trim_utf16(text: str, limit: int) -> str:
         else:
             high = middle - 1
     return text[:low]
+
+
+def tail_lines_utf16(text: str, limit: int) -> tuple[str, bool]:
+    """Оставляет конец текста, отбрасывая СТРОКИ с начала, пока не влезет.
+
+    Отбрасываются целые строки, а не середина слова: заметка собирается
+    построчно, и так понятно, что именно пропало. Возвращает (текст, обрезано).
+    """
+    if utf16_len(text) <= limit:
+        return text, False
+    lines = text.split("\n")
+    while lines and utf16_len("\n".join(lines)) > limit:
+        lines.pop(0)
+    return "\n".join(lines), True
 
 
 def normalize(code: str | None) -> str | None:

@@ -608,16 +608,47 @@ async def run() -> None:
           "и бот не соврал, что дописал")
     check(any(t(LANG, "note_full") in m for m in list(fake.edited) + list(fake.sent)),
           "бот честно сказал, что заметка заполнена")
-    check(any(t(LANG, "btn_clear_note") == b.text
-              for m in fake.markups if m for row in getattr(m, "inline_keyboard", [])
-              for b in row),
-          "и дал кнопку очистки")
-    # Очистка возвращает возможность писать
+    offered = [b for m in fake.markups if m
+               for row in getattr(m, "inline_keyboard", []) for b in row]
+    check(any(b.callback_data == f"nt:{full_ep.id}" for b in offered),
+          "первой кнопкой предложено СОХРАНИТЬ текст, вытеснив старое")
+    check(any(b.callback_data == f"nc:{full_ep.id}" for b in offered),
+          "очистка тоже доступна, но отдельным выбором")
+    # Главное: кнопка СОХРАНЯЕТ текст, а не уничтожает заметку. Раньше человек,
+    # делавший ровно то, что написано в сообщении, терял записанные симптомы,
+    # а присланный заново текст уезжал в новый, выдуманный эпизод.
+    episodes_before = db.count_episodes(uid)
+    tail_before = saved_note.splitlines()[-1]
+    await press(f"nt:{full_ep.id}")
+    after_push = db.get_episode(uid, full_ep.id)
+    check(after_push.note.endswith(critical), "критичная строка записана в тот же эпизод")
+    check(tail_before in after_push.note, "недавние записи заметки сохранены")
+    check(db.NOTE_DROPPED_MARK in after_push.note, "и видно, что начало пришлось убрать")
+    check(db.count_episodes(uid) == episodes_before,
+          "выдуманный эпизод не создан")
+    check(i18n.utf16_len(after_push.note) <= db.MAX_NOTE_TOTAL, "лимит соблюдён")
+
+    # Очистка, когда текст уже у бота, тоже записывает его, а не теряет
+    ud["pending_note"] = critical
+    fake.edited.clear()
+    await press("nn")
+    check(any(t(LANG, "note_full") in m for m in fake.edited), "снова переполнено")
     await press(f"nc:{full_ep.id}")
-    _, st = db.append_note(uid, full_ep.id, "теперь влезает")
-    check(st == db.NOTE_OK and "влезает" in db.get_episode(uid, full_ep.id).note,
-          "после очистки заметка снова пишется")
+    cleared = db.get_episode(uid, full_ep.id)
+    check(cleared.note == critical,
+          f"после очистки присланный текст записан, а не потерян ({cleared.note!r})")
+    check(db.count_episodes(uid) == episodes_before, "и снова без выдуманных эпизодов")
     db.delete_episode(uid, full_ep.id)
+
+    # Тай-брейкер: два эпизода в одну секунду — «текущий» должен быть
+    # определённым, иначе заметка уходит в произвольный из них
+    same = db.utcnow()
+    first = db.start_episode(uid, started_at=same)
+    second = db.start_episode(uid, started_at=same)
+    check(db.active_episode(uid, cfg.STALE_AFTER_MIN).id == second.id,
+          "при равном времени текущим считается последний созданный")
+    check(db.open_episode(uid).id == second.id, "то же для open_episode")
+    db.delete_episode(uid, first.id); db.delete_episode(uid, second.id)
 
     # 19c. Второй рубеж на уровне БД: «ещё идёт» и сдвиг начала отклоняются,
     # если эпизод закрыли в обход функции (второй инстанс на том же файле).
