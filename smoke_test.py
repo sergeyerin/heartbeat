@@ -78,9 +78,22 @@ def main() -> int:
         # мешали проверке «что считается активным».
         STALE_MIN = 60
         fuid = uid + 10
+        def age(user_id, episode_id, hours):
+            """Переводит часы эпизода назад. Напрямую в БД: это фикстура
+            времени, а db.shift_start (правильно) обновляет confirmed_at и
+            эпизод перестаёт быть забытым."""
+            ep_now = db.get_episode(user_id, episode_id)
+            shifted = ep_now.started_at - timedelta(hours=hours)
+            db._db().execute(
+                "UPDATE episodes SET started_at = ?, confirmed_at = NULL "
+                "WHERE id = ? AND user_id = ?",
+                (db._iso(shifted), episode_id, user_id),
+            )
+            db._db().commit()
+            return db.get_episode(user_id, episode_id)
+
         forgotten = db.start_episode(fuid)
-        db.shift_start(fuid, forgotten.id, -60 * 20)  # началось 20 часов назад
-        forgotten = db.get_episode(fuid, forgotten.id)
+        forgotten = age(fuid, forgotten.id, 20)
         check(forgotten.is_open, "забытый эпизод остаётся открытым")
         check(forgotten.is_stale(STALE_MIN), "через 20 часов молчания эпизод считается забытым")
         check(db.active_episode(fuid, STALE_MIN) is None,
@@ -111,9 +124,7 @@ def main() -> int:
         check("примерной длительностью" in report.period_report(30, [approx], [], LANG),
               "отчёт отмечает примерные длительности")
 
-        hung = db.start_episode(fuid)
-        db.shift_start(fuid, hung.id, -60 * 30)
-        hung = db.get_episode(fuid, hung.id)
+        hung = age(fuid, db.start_episode(fuid).id, 30)
         card_stale = report.episode_card(hung, LANG)
         check("окончание не отмечено" in card_stale, "карточка забытого эпизода честно это пишет")
         check("Длительность неизвестна" in card_stale, "длительность не выдумывается")
@@ -238,7 +249,7 @@ def main() -> int:
         ROW_LIMITS = {2: 18, 3: 10}  # максимум символов на кнопку при N в ряду
         sample = db.start_episode(fuid)
         stale_sample = db.get_episode(fuid, sample.id)
-        db.shift_start(fuid, sample.id, -60 * 30)
+        age(fuid, sample.id, 30)
         too_long = []
         for code in i18n.SUPPORTED:
             boards = [
@@ -298,6 +309,17 @@ def main() -> int:
               "примерная длительность не затирает точную")
         check(db.shift_start(fuid, guard.id, -30) is None,
               "сдвиг начала у закрытого эпизода отклонён")
+        # B2: сдвиг начала не должен делать идущий эпизод забытым. Человек
+        # уточняет время приступа, а не сообщает, что замолчал.
+        corrected = db.start_episode(fuid)
+        for _ in range(2):
+            corrected = db.shift_start(fuid, corrected.id, -30)
+        check(corrected is not None and not corrected.is_stale(60),
+              "двойной сдвиг начала не превратил идущий эпизод в забытый")
+        check(corrected.confirmed_at is not None,
+              "сдвиг обновляет отметку активности")
+        db.delete_episode(fuid, corrected.id)
+
         # Барьер именно в UPDATE: python-проверка выше короткого замыкания не
         # делает, если состояние изменилось уже после неё (второй инстанс на
         # том же файле). Эмулируем, закрыв эпизод в обход функции.

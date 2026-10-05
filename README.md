@@ -110,6 +110,18 @@ more than `RECENT_EPISODE_MIN` minutes ago (3 hours by default).
   Excel and Google Sheets open it without encoding games). Handy to hand to a
   cardiologist.
 
+## Where it happened
+
+The «📍 Place» button on the bottom keyboard attaches your location to the
+current episode — it has to live there, because requesting a location is
+something only a reply keyboard can do. The card then shows an OpenStreetMap
+link (no account, no tracking), and the CSV gets latitude and longitude columns.
+
+Be aware of what this adds: on top of symptoms and pulse, the diary now knows
+where you go. The card carries a «📍 Remove the place» button, `/forget` clears
+coordinates with everything else, and nothing is stored unless you press the
+button.
+
 ## Deleting your data
 
 `/forget` wipes everything: episodes, medication entries, notes, places and the
@@ -229,6 +241,10 @@ Things worth knowing:
 | `EPISODE_WINDOW_MIN` | `30` | episode window: when to ask "has it stopped?", and how much «⏳ Still ongoing» adds (0 — never ask) |
 | `STALE_AFTER_MIN` | two windows (`60`) | minutes of silence that mean "no end time" |
 | `CARD_TICK_SEC` | `60` | how often the card of an ongoing episode is redrawn (0 — never) |
+| `MAX_EPISODES_PER_USER` | `5000` | cap on episodes per person |
+| `MAX_OPEN_EPISODES` | `10` | cap on unclosed episodes per person |
+| `MIN_ACTION_INTERVAL_SEC` | `1.5` | minimum gap between episode/medication entries |
+| `EXPORT_COOLDOWN_SEC` | `60` | cooldown on /export, which builds the whole diary in memory |
 | `RECENT_EPISODE_MIN` | `180` | how long after an episode ends plain input still attaches to it |
 
 ## Layout

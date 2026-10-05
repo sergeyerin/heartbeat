@@ -17,12 +17,15 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY config.py i18n.py vocab.py db.py report.py bot.py smoke_test.py flow_test.py ./
+COPY config.py i18n.py vocab.py db.py report.py bot.py \
+     smoke_test.py flow_test.py fuzz_test.py ./
 
-# Офлайн-проверки при сборке: схема БД и форматирование (smoke_test) плюс
-# прогон сценариев через хендлеры с подменённым Telegram (flow_test).
+# Офлайн-проверки при сборке: схема БД и форматирование (smoke_test), прогон
+# сценариев через хендлеры с подменённым Telegram (flow_test) и фаззинг
+# callback_data (fuzz_test) — payload кнопки управляется клиентом, и именно на
+# нём жили два блокера.
 # Сломанный образ падает на `docker build`, а не в проде.
-RUN python smoke_test.py && python flow_test.py
+RUN python smoke_test.py && python flow_test.py && python fuzz_test.py
 
 # Каталог для SQLite (монтируется как volume из ./data).
 RUN mkdir -p /app/data

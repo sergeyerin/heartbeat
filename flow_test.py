@@ -64,6 +64,7 @@ class FakeBot:
         self.edited: list[str] = []
         self.documents: list[str] = []
         self.answers: list[str] = []
+        self.deleted: list[int] = []
         self.markups: list[object] = []
 
     async def send_message(self, chat_id, text, **kwargs):
@@ -91,6 +92,10 @@ class FakeBot:
 
     async def answer_callback_query(self, callback_query_id, text=None, **kwargs):
         self.answers.append(text or "")
+        return True
+
+    async def delete_message(self, chat_id=None, message_id=None, **kwargs):
+        self.deleted.append(message_id)
         return True
 
     async def send_chat_action(self, *a, **k):
@@ -872,13 +877,13 @@ async def run() -> None:
 
     # Новая карточка гасит кнопки прежней
     old_msg = db.get_episode(uid, live.id).card_msg
-    fake.markups.clear()
+    fake.markups.clear(); fake.deleted.clear()
     await press(f"s:{live.id}:2")       # любое действие, перерисовывающее карточку
     await bot._send_card(text_update(fake, "x"), make_context(fake, ud),
-                         db.get_episode(uid, live.id), LANG)
+                         db.get_episode(uid, live.id), LANG, header="тест")
     check(db.get_episode(uid, live.id).card_msg != old_msg,
           "карточка переехала в новое сообщение")
-    check(None in fake.markups, "у прежней карточки кнопки сняты")
+    check(old_msg in fake.deleted, "прежняя карточка убрана из чата")
 
     # Эпизод закрыт — обновление прекращается
     await press(f"e:{live.id}")
@@ -940,10 +945,23 @@ async def run() -> None:
           "/forget спрашивает подтверждение, а не удаляет сразу")
     confirm_btns = [b for m in fake.markups if m
                     for row in getattr(m, "inline_keyboard", []) for b in row]
-    check(any(b.callback_data == "fy" for b in confirm_btns), "есть кнопка подтверждения")
+    check(any((b.callback_data or "").startswith("fy:") for b in confirm_btns),
+          "есть кнопка подтверждения с одноразовым токеном")
+    token = ud.get("forget_token")
+    check(token and f"fy:{token}" in [b.callback_data for b in confirm_btns],
+          "токен кнопки совпадает с выданным")
     other = 200
     db.start_episode(other)   # чужие данные не должны пострадать
-    await press("fy")
+    # Старое или поддельное подтверждение не должно ничего удалять
+    before_fake_tap = db.count_episodes(uid)
+    await press("fy:подделка")
+    check(db.count_episodes(uid) == before_fake_tap,
+          "чужой токен подтверждения ничего не удаляет")
+    await press("fy")  # без токена вообще
+    check(db.count_episodes(uid) == before_fake_tap,
+          "подтверждение без токена тоже отклонено")
+    ud["forget_token"] = token
+    await press(f"fy:{token}")
     check(db.count_episodes(uid) == 0, "все эпизоды удалены")
     check(db.all_meds(uid) == [], "лекарства удалены")
     check(db.get_lang(uid) is None, "выбранный язык тоже удалён")
@@ -955,6 +973,32 @@ async def run() -> None:
     check(any(t(LANG, "forget_empty") in m for m in fake.sent),
           "на пустом дневнике /forget говорит, что удалять нечего")
 
+    # 19i. Одна карточка на эпизод, а не растущая куча.
+    while bot._current_episode(uid) is not None:
+        cur = bot._current_episode(uid)
+        db.close_episode(uid, cur.id)
+        age_out(uid, cur.id, days=3)
+    await tap(t(LANG, "btn_start"))
+    one = db.active_episode(uid, cfg.STALE_AFTER_MIN)
+    first_msg = db.get_episode(uid, one.id).card_msg
+    # /last при живой карточке правит её на месте, не присылая новой
+    fake.sent.clear(); fake.edited.clear()
+    await bot.cmd_last(text_update(fake, "/last"), make_context(fake, ud))
+    check(not fake.sent, f"/last не присылает новую карточку ({fake.sent})")
+    check(fake.edited, "/last обновляет существующую")
+    check(db.get_episode(uid, one.id).card_msg == first_msg,
+          "и карточка осталась тем же сообщением")
+    # А когда есть что сообщить — прежняя карточка удаляется
+    fake.deleted.clear()
+    await bot._send_card(text_update(fake, "x"), make_context(fake, ud),
+                         db.get_episode(uid, one.id), LANG, header="📝 тест")
+    check(first_msg in fake.deleted,
+          f"прежняя карточка удалена, а не оставлена ({fake.deleted})")
+    check(db.get_episode(uid, one.id).card_msg != first_msg,
+          "карточка переехала в новое сообщение")
+    db.close_episode(uid, one.id)
+    db.delete_episode(uid, one.id)
+
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять
     if db.last_episode(uid) is None:
@@ -962,7 +1006,17 @@ async def run() -> None:
     last_id = db.last_episode(uid).id
     await press(f"d:{last_id}")
     check(any("Удалить эпизод" in t for t in fake.edited), "спросил подтверждение удаления")
-    await press(f"dy:{last_id}")
+    confirm_rows = [row for m in fake.markups if m
+                    for row in getattr(m, "inline_keyboard", []) if len(row) == 2]
+    check(confirm_rows and (confirm_rows[-1][0].callback_data or "").startswith("c:"),
+          "безопасный выбор первым, деструктивный вторым")
+    del_token = ud.get(f"del_token:{last_id}")
+    check(del_token, "подтверждение удаления выдало одноразовый токен")
+    await press(f"dy:{last_id}:подделка")
+    check(db.get_episode(uid, last_id) is not None,
+          "старое подтверждение из истории чата не удаляет эпизод")
+    ud[f"del_token:{last_id}"] = del_token
+    await press(f"dy:{last_id}:{del_token}")
     check(db.get_episode(uid, last_id) is None, "эпизод удалён после подтверждения")
     await press(f"s:{last_id}:2")
     check(any("удалён" in t for t in fake.edited), "кнопка удалённого эпизода не падает")

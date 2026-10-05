@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+import secrets
 from datetime import date, datetime, timedelta, timezone
 
 from telegram import (
@@ -473,16 +474,37 @@ async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
     text = (header + "\n\n" if header else "") + report.episode_card(ep, lang)
     chat_id = update.effective_chat.id
-    # У прежней карточки этого эпизода снимаем кнопки: они живут в истории чата
-    # вечно и нарисованы в старом состоянии — именно через них перезаписывалось
-    # уже записанное время окончания.
+
+    # Одна карточка на эпизод, а не растущая куча.
     if ep.card_msg:
+        if not header:
+            # Нечего сообщать отдельно (например /last) — обновляем живую
+            # карточку на месте и не плодим сообщений вообще.
+            try:
+                await context.bot.edit_message_text(
+                    text, chat_id=chat_id, message_id=ep.card_msg,
+                    reply_markup=card_keyboard(ep, lang),
+                )
+                if ep.is_open:
+                    _schedule_tick(context.job_queue, ep.user_id, ep.id, chat_id)
+                return
+            except Exception as exc:
+                if "not modified" in str(exc):
+                    return
+        # Есть что сообщить — карточка уезжает вниз новым сообщением, а прежнюю
+        # убираем совсем: иначе в чате остаётся несколько карточек одного
+        # эпизода с замершей длительностью, и непонятно, какая настоящая.
         try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=chat_id, message_id=ep.card_msg, reply_markup=None
-            )
+            await context.bot.delete_message(chat_id=chat_id, message_id=ep.card_msg)
         except Exception:
-            pass
+            # Старше 48 часов или уже удалена — тогда хотя бы снимаем кнопки,
+            # чтобы по ним нельзя было действовать.
+            try:
+                await context.bot.edit_message_reply_markup(
+                    chat_id=chat_id, message_id=ep.card_msg, reply_markup=None
+                )
+            except Exception:
+                pass
     # Длинная карточка уходит частями; кнопки и id для последующих правок —
     # у последней, рядом с актуальным состоянием.
     chunks = _split(text)
@@ -522,6 +544,22 @@ async def _refresh(query, ep: db.Episode | None, lang: str,
                              report.episode_card(ep, lang), card_keyboard(ep, lang))
 
 
+def _window() -> timedelta:
+    return timedelta(minutes=config.EPISODE_WINDOW_MIN)
+
+
+def _until(due: datetime) -> timedelta:
+    """Сколько ждать до срока, но не меньше пяти секунд.
+
+    Считаем в секундах: прежняя арифметика в минутах отбрасывала дробную часть
+    (`int(1.9)` → 1), и после рестарта напоминание срабатывало почти на минуту
+    раньше срока — человек получал «идёт уже 29 мин» на тридцатиминутном окне.
+    Пол в пять секунд нужен для уже просроченных задач: сработать надо сразу,
+    но не внутри самого старта.
+    """
+    return max(timedelta(seconds=5), due - db.utcnow())
+
+
 def _job_name(user_id: int, episode_id: int) -> str:
     return f"remind:{user_id}:{episode_id}"
 
@@ -546,8 +584,8 @@ def _stop_live(job_queue, user_id: int, episode_id: int) -> None:
     _cancel_tick(job_queue, user_id, episode_id)
 
 
-def _schedule_reminder(job_queue, user_id: int, episode_id: int, minutes: int,
-                       final: bool = False) -> None:
+def _schedule_reminder(job_queue, user_id: int, episode_id: int,
+                       delay: timedelta, final: bool = False) -> None:
     """Запланировать вопрос «отпустило?» через N минут.
 
     ``final=True`` — это уже контрольный заход: если и к нему ответа не будет,
@@ -555,12 +593,12 @@ def _schedule_reminder(job_queue, user_id: int, episode_id: int, minutes: int,
     спрашивает один раз, а продлевает эпизод только сам человек кнопкой
     «⏳ Ещё идёт». Имя job одно на эпизод, поэтому новый вызов заменяет прежний.
     """
-    if job_queue is None or minutes <= 0:
+    if job_queue is None or delay.total_seconds() <= 0:
         return
     _cancel_reminder(job_queue, user_id, episode_id)
     job_queue.run_once(
         _remind,
-        when=timedelta(minutes=minutes),
+        when=delay,
         # misfire_grace_time=None — иначе APScheduler берёт свой дефолт в ОДНУ
         # СЕКУНДУ и просто выбрасывает задачу, опоздавшую больше: цикл событий
         # занят выгрузкой CSV, контейнер приостановлен, шаг NTP — и вопрос
@@ -656,8 +694,7 @@ async def _remind(context: ContextTypes.DEFAULT_TYPE) -> None:
         # совпадали с тем, что показывают карточка и отчёт.
         anchor = ep.confirmed_at or ep.started_at
         due = anchor + timedelta(minutes=config.STALE_AFTER_MIN)
-        left = (due - db.utcnow()).total_seconds() / 60
-        _schedule_reminder(context.job_queue, user_id, ep.id, max(1, int(left) + 1), final=True)
+        _schedule_reminder(context.job_queue, user_id, ep.id, _until(due), final=True)
         return
     if final or stale:
         # Вопрос был задан и остался без ответа: эпизод закрывать нечем, время
@@ -677,9 +714,7 @@ async def _remind(context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup=remind_keyboard(ep, lang),
     )
     db.set_remind_stage(user_id, ep.id, 1)
-    _schedule_reminder(
-        context.job_queue, user_id, ep.id, config.EPISODE_WINDOW_MIN, final=True
-    )
+    _schedule_reminder(context.job_queue, user_id, ep.id, _window(), final=True)
 
 
 async def _mention_forgotten(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE,
@@ -737,10 +772,15 @@ async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not episodes and not meds:
         await update.message.reply_text(t(lang, "forget_empty"))
         return
+    # Одноразовый токен: инлайн-кнопки живут в истории чата вечно, и без него
+    # одно случайное нажатие на старое подтверждение стирало весь дневник
+    # безвозвратно. Для эпизодов этот инвариант уже соблюдался, а здесь — нет.
+    token = secrets.token_urlsafe(6)
+    context.user_data["forget_token"] = token
     await update.message.reply_text(
         t(lang, "forget_confirm", episodes=episodes, meds=meds),
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(t(lang, "btn_forget_yes"), callback_data="fy")],
+            [InlineKeyboardButton(t(lang, "btn_forget_yes"), callback_data=f"fy:{token}")],
             [InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="nx")],
         ]),
     )
@@ -781,7 +821,7 @@ async def action_start_episode(update: Update, context: ContextTypes.DEFAULT_TYP
         reply_markup=main_keyboard(True, lang),
     )
     await _send_card(update, context, ep, lang)
-    _schedule_reminder(context.job_queue, user_id, ep.id, config.EPISODE_WINDOW_MIN)
+    _schedule_reminder(context.job_queue, user_id, ep.id, _window())
     # Напоминание о старых незакрытых эпизодах здесь НЕ показываем: человеку
     # сейчас плохо, а разбор бэклога — не то, чем его стоит занимать. Оно
     # появится в «Сегодня» и в отчёте, то есть когда он сам пришёл смотреть.
@@ -1096,13 +1136,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
     if action == "fy":  # подтверждённое удаление всех своих данных
+        token = context.user_data.pop("forget_token", None)
+        if not token or len(parts) < 2 or parts[1] != token:
+            # Старое подтверждение из истории чата, или уже использованное,
+            # или после рестарта. Молча удалять дневник по такому нажатию нельзя.
+            await ack(t(lang, "forget_stale"))
+            try:
+                await query.edit_message_text(t(lang, "forget_stale"))
+            except Exception:
+                pass
+            return
         # Снимаем все задачи этого пользователя: иначе напоминания и обновления
         # карточек продолжат ходить по удалённым эпизодам.
         if context.job_queue is not None:
+            # Имена задач — "remind:<user>:<episode>" и "tick:<user>:<episode>",
+            # поэтому сверяем именно поле пользователя. Проверка на суффикс
+            # ловила позицию ЭПИЗОДА: пользователь №99 снимал задачу чужого
+            # эпизода №99.
             for job in list(context.job_queue.jobs()):
-                if job.name and job.name.endswith(f":{user_id}") or (
-                    job.name and f":{user_id}:" in job.name
-                ):
+                parts_name = (job.name or "").split(":")
+                if len(parts_name) == 3 and parts_name[1] == str(user_id):
                     job.schedule_removal()
         counts = db.purge_user(user_id)
         context.user_data.clear()
@@ -1182,7 +1235,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             _note_header(lang, status, t(lang, "ep_recorded", id=ep.id))
         )
         await _send_card(update, context, ep, lang)
-        _schedule_reminder(context.job_queue, user_id, ep.id, config.EPISODE_WINDOW_MIN)
+        _schedule_reminder(context.job_queue, user_id, ep.id, _window())
         return
     if action == "nx":  # «Нет» / «Отмена» — снимает и ожидание ввода
         await ack()
@@ -1212,7 +1265,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ep = db.set_pulse(user_id, ep.id, pulse)
         await query.edit_message_text(t(lang, "ep_recorded_pulse", id=ep.id, pulse=ep.pulse))
         await _send_card(update, context, ep, lang)
-        _schedule_reminder(context.job_queue, user_id, ep.id, config.EPISODE_WINDOW_MIN)
+        _schedule_reminder(context.job_queue, user_id, ep.id, _window())
         return
     if action in ("mn", "mt", "md"):  # лекарство: имя из истории / ввести / отменить
         med_id = _row_id(parts)
@@ -1323,12 +1376,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         context.user_data["await"] = {"what": "note", "id": episode_id}
         await ack()
         rows = [[InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="nx")]]
+        clear_token = secrets.token_urlsafe(4)
+        context.user_data[f"nc_token:{episode_id}"] = clear_token
         if ep.note:
             # Заметка — единственное поле, которое раньше нельзя было
             # поправить: пульс перезаписывается, переключатели снимаются,
             # а дописанное в заметку убиралось только удалением эпизода.
             rows.insert(0, [InlineKeyboardButton(
-                t(lang, "btn_clear_note"), callback_data=f"nc:{episode_id}"
+                t(lang, "btn_clear_note"),
+                callback_data=f"nc:{episode_id}:{clear_token}",
             )])
         await query.message.reply_text(
             t(lang, "note_prompt", id=episode_id),
@@ -1359,6 +1415,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     if action == "nc":
         pending_text = context.user_data.pop(f"note_overflow:{episode_id}", None)
+        if pending_text is None:
+            # Чистая очистка — действие деструктивное, поэтому нужен свежий
+            # токен. Без него старая кнопка из истории чата стирала заметку.
+            token = context.user_data.pop(f"nc_token:{episode_id}", None)
+            if not token or len(parts) < 3 or parts[2] != token:
+                await ack(t(lang, "forget_stale"))
+                await _refresh(query, ep, lang, context)
+                return
         cleared = db.clear_note(user_id, episode_id)
         if pending_text:
             # Очистили, чтобы освободить место под уже присланный текст — сразу
@@ -1440,7 +1504,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _refresh(query, db.get_episode(user_id, episode_id), lang)
             return
         ep = reopened
-        _schedule_reminder(context.job_queue, user_id, episode_id, config.EPISODE_WINDOW_MIN)
+        _schedule_reminder(context.job_queue, user_id, episode_id, _window())
         await ack(t(lang, "ack_reopened"))
         await _refresh(query, ep, lang)
         await context.bot.send_message(
@@ -1461,7 +1525,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ep = confirmed
         # Человек ответил — цикл вопросов начинается заново.
         db.set_remind_stage(user_id, episode_id, 0)
-        _schedule_reminder(context.job_queue, user_id, episode_id, config.EPISODE_WINDOW_MIN)
+        _schedule_reminder(context.job_queue, user_id, episode_id, _window())
         await ack(t(lang, "ack_extended", minutes=config.EPISODE_WINDOW_MIN))
         try:
             await query.edit_message_text(
@@ -1551,17 +1615,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if action == "d":
         await ack()
         try:
+            # Одноразовый токен, как у /forget: кнопка подтверждения остаётся
+            # в истории чата навсегда, и нажатие на старую удаляло бы эпизод
+            # без повторного вопроса.
+            token = secrets.token_urlsafe(4)
+            context.user_data[f"del_token:{ep.id}"] = token
             await query.edit_message_text(
                 t(lang, "delete_confirm", id=ep.id, time=report.hhmm(ep.started_at)),
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton(t(lang, "btn_delete"), callback_data=f"dy:{ep.id}"),
                     InlineKeyboardButton(t(lang, "btn_back"), callback_data=f"c:{ep.id}"),
+                    InlineKeyboardButton(t(lang, "btn_delete"),
+                                         callback_data=f"dy:{ep.id}:{token}"),
                 ]]),
             )
         except Exception as exc:
             log.warning("Подтверждение удаления не показалось: %s", exc)
         return
     if action == "dy":
+        token = context.user_data.pop(f"del_token:{episode_id}", None)
+        if not token or len(parts) < 3 or parts[2] != token:
+            await ack(t(lang, "forget_stale"))
+            await _refresh(query, ep, lang, context)
+            return
         db.delete_episode(user_id, episode_id)
         _stop_live(context.job_queue, user_id, episode_id)
         await ack(t(lang, "ack_deleted"))
@@ -1618,11 +1693,14 @@ async def post_init(app) -> None:
     else:
         restored = 0
         for ep in db.all_open_episodes(config.STALE_AFTER_MIN):
+            # Срок считается от того порога, на котором эпизод сейчас стоит:
+            # если вопрос уже задан, ждать надо до «забытости», а не до окна.
+            asked = ep.remind_stage >= 1
+            threshold = config.STALE_AFTER_MIN if asked else config.EPISODE_WINDOW_MIN
             anchor = ep.confirmed_at or ep.started_at
-            due = anchor + timedelta(minutes=config.EPISODE_WINDOW_MIN)
-            left = (due - db.utcnow()).total_seconds() / 60
-            _schedule_reminder(app.job_queue, ep.user_id, ep.id, max(1, int(left)),
-                               final=ep.remind_stage >= 1)
+            due = anchor + timedelta(minutes=threshold)
+            _schedule_reminder(app.job_queue, ep.user_id, ep.id, _until(due),
+                               final=asked)
             if ep.card_msg:
                 # chat_id == user_id: диалог приватный (см. register_handlers)
                 _schedule_tick(app.job_queue, ep.user_id, ep.id, ep.user_id)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Справочники симптомов, причин и оценок тяжести на трёх языках.
+"""Справочники симптомов, причин и оценок тяжести на двух языках.
 
 В БД хранятся только коды, подписи — для отображения. Переименование подписи или
 добавление языка не ломает старые записи; коды менять нельзя, только добавлять.
@@ -15,7 +15,8 @@ from i18n import FALLBACK
 # выключатель или нарастало, кончилось резко или угасло) — по нему различают
 # фибрилляцию, тахикардию и экстрасистолию. Технически это обычные коды
 # симптомов, поэтому меню, агрегатор топа и колонка CSV подхватывают их сами.
-SYMPTOM_CODES = ("irregular", "regular", "abrupt_on", "gradual_on", "abrupt_off",
+SYMPTOM_CODES = ("irregular", "regular", "abrupt_on", "gradual_on",
+                 "abrupt_off", "gradual_off",
                  "skip", "fast", "short", "weak", "dizzy", "chest", "faint",
                  "anxiety", "sweat", "cold", "nausea")
 
@@ -29,6 +30,7 @@ SYMPTOMS: dict[str, dict[str, str]] = {
         "abrupt_on": "началось резко, как выключатель",
         "gradual_on": "нарастало постепенно",
         "abrupt_off": "кончилось резко",
+        "gradual_off": "угасало постепенно",
         "skip": "перебои, замирания",
         "fast": "частое, сильное сердцебиение",
         "short": "одышка",
@@ -47,6 +49,7 @@ SYMPTOMS: dict[str, dict[str, str]] = {
         "abrupt_on": "started abruptly, like a switch",
         "gradual_on": "built up gradually",
         "abrupt_off": "stopped abruptly",
+        "gradual_off": "faded gradually",
         "skip": "skipped beats, pauses",
         "fast": "racing or pounding heartbeat",
         "short": "shortness of breath",

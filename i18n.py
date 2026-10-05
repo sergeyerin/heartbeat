@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Строки интерфейса на русском, английском и португальском.
+"""Строки интерфейса на русском и английском.
 
 Язык определяется по профилю Telegram (``language_code``) и может быть
 переопределён командой /lang — выбор хранится в БД, поэтому переживает рестарт
@@ -132,7 +132,13 @@ STRINGS: dict[str, dict[str, str]] = {
               "/week, /month — отчёт за 7 и 30 дней\n"
               "/export — CSV со всеми записями\n"
               "/lang — язык бота\n"
+              "/forget — удалить все мои записи\n"
               "/cancel — отменить ожидание ввода\n\n"
+              "Мелкие удобства: число в чат — это пульс, текст — заметка к "
+              "текущему эпизоду, «📍 Место» — где это было.\n\n"
+              "Что я храню: времена эпизодов, тяжесть, пульс, симптомы, причины, "
+              "заметки, приёмы лекарств и места, если вы их отмечали. Всё это "
+              "лежит на сервере бота и удаляется целиком командой /forget.\n\n"
               "Время хранится в UTC, показывается в зоне {tz}.\n\n⚕️ Это дневник, а не медицинская рекомендация. Решения — с врачом.",
         "en": "Commands:\n"
               "/log — log the start of an episode\n"
@@ -143,7 +149,13 @@ STRINGS: dict[str, dict[str, str]] = {
               "/week, /month — 7- and 30-day report\n"
               "/export — CSV with every record\n"
               "/lang — bot language\n"
+              "/forget — delete all my records\n"
               "/cancel — cancel a pending input\n\n"
+              "Shortcuts: a bare number is your pulse, plain text becomes a note on "
+              "the current episode, «📍 Place» records where it happened.\n\n"
+              "What I store: episode times, severity, pulse, symptoms, triggers, "
+              "notes, medication entries, and places if you marked them. It all "
+              "lives on the bot's server and /forget deletes the lot.\n\n"
               "Times are stored in UTC and shown in the {tz} zone.\n\n⚕️ This is a diary, not medical advice. Decisions belong with your doctor.",
     },
 

@@ -526,10 +526,16 @@ def shift_start(user_id: int, episode_id: int, minutes: int) -> Episode | None:
     if ep is None or not ep.is_open:
         return None
     started = min(ep.started_at + timedelta(minutes=minutes), utcnow())
+    # confirmed_at обязательно обновить: «забытость» считается от
+    # COALESCE(confirmed_at, started_at), поэтому сдвиг начала назад СТАРИЛ
+    # эпизод. Два нажатия «⏪ −30 мин» переваливали порог, и идущий приступ
+    # объявлялся незавершённым: пульс, набранный следующим сообщением, уходил
+    # в никуда, плашка возвращалась к «Аритмия», а бот предлагал записать
+    # второй эпизод про то же самое. Человек всего лишь уточнил время.
     cur = _db().execute(
-        "UPDATE episodes SET started_at = ? "
+        "UPDATE episodes SET started_at = ?, confirmed_at = ? "
         "WHERE id = ? AND user_id = ? AND ended_at IS NULL",
-        (_iso(started), episode_id, user_id),
+        (_iso(started), _iso(utcnow()), episode_id, user_id),
     )
     _db().commit()
     if cur.rowcount == 0:
