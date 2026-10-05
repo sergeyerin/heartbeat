@@ -319,6 +319,16 @@ STRINGS: dict[str, dict[str, str]] = {
               "If you don't answer, in {minutes} min I'll log the episode with "
               "no end time.",
     },
+    # Короткое сообщение-«плашка»: карточка правится на месте (инлайн), а
+    # нижнее меню меняется только вместе с НОВЫМ сообщением. При переходе в
+    # «забыт» эпизод перестаёт быть активным, и плашка должна вернуться к
+    # «⚡️ Аритмия» — иначе остаётся «✅ Отпустило», которое уже не сработает.
+    "plate_after_stale": {
+        "ru": "Эпизод без отметки окончания — отметьте длительность на карточке "
+              "выше, если помните. Начнётся снова — жмите «{btn_start}».",
+        "en": "The episode has no end time — set its duration on the card above "
+              "if you remember. If it starts again, tap «{btn_start}».",
+    },
     "remind_stale_tail": {
         "ru": "Если помните, сколько длилось — отметьте, и запись станет полной.",
         "en": "If you remember how long it lasted, mark it and the record is "

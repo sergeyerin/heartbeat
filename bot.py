@@ -927,6 +927,20 @@ async def _tick(context: ContextTypes.DEFAULT_TYPE) -> None:
         job.schedule_removal()
 
 
+async def _restore_plate(bot_obj, user_id: int, lang: str) -> None:
+    """Вернуть нижнее меню к «⚡️ Аритмия» после того, как эпизод стал забытым.
+
+    Карточка правится на месте (инлайн), а reply-клавиатура меняется только с
+    новым сообщением — поэтому плашку обновляем отдельной короткой репликой.
+    `has_open` по _active: забытый эпизод активным не считается.
+    """
+    await bot_obj.send_message(
+        user_id,
+        t(lang, "plate_after_stale", btn_start=t(lang, "btn_start")),
+        reply_markup=main_keyboard(_active(user_id) is not None, lang),
+    )
+
+
 async def _remind(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Эпизод всё ещё открыт — спрашиваем, что с ним."""
     job = context.job
@@ -961,6 +975,7 @@ async def _remind(context: ContextTypes.DEFAULT_TYPE) -> None:
         # что рисуют тик и post_init — одна карточка, один вид, без разрыва и
         # без второго сообщения. Окно уже уведомило 30 мин назад; молчание и
         # есть ответ, и тихий переход ему соответствует.
+        edited_in_place = False
         if ep.card_msg:
             try:
                 await context.bot.edit_message_text(
@@ -968,17 +983,20 @@ async def _remind(context: ContextTypes.DEFAULT_TYPE) -> None:
                     chat_id=chat_id, message_id=ep.card_msg,
                     reply_markup=card_keyboard(ep, lang),
                 )
-                return
+                edited_in_place = True
             except Exception as exc:
                 if "not modified" in str(exc):
-                    return
-        # Карточки нет или её уже нельзя править — присылаем стальную заново.
-        sent = await context.bot.send_message(
-            chat_id,
-            report.episode_card(ep, lang),
-            reply_markup=card_keyboard(ep, lang),
-        )
-        db.set_card_msg(user_id, ep.id, sent.message_id)
+                    edited_in_place = True
+        if not edited_in_place:
+            # Карточки нет или её уже нельзя править — присылаем стальную заново.
+            sent = await context.bot.send_message(
+                chat_id,
+                report.episode_card(ep, lang),
+                reply_markup=card_keyboard(ep, lang),
+            )
+            db.set_card_msg(user_id, ep.id, sent.message_id)
+        # И возвращаем нижнее меню: эпизод больше не активен.
+        await _restore_plate(context.bot, user_id, lang)
         return
 
     # Окно: это и есть уведомление. Старую карточку удаляем, вопрос приходит
@@ -2215,6 +2233,7 @@ async def post_init(app) -> None:
         # замороженной на «идёт, уже N мин». Один раз догоняем: правим в
         # стальную форму. Это и расклеивает карточку, зависшую у пользователя.
         caught = 0
+        plated: set[int] = set()
         for ep in db.stale_cards_to_refresh(config.STALE_AFTER_MIN):
             ep_lang = _job_lang(ep.user_id)
             try:
@@ -2224,10 +2243,26 @@ async def post_init(app) -> None:
                     reply_markup=card_keyboard(ep, ep_lang),
                 )
                 caught += 1
+                # Плашку возвращаем по одному разу на пользователя: карточка
+                # обновилась на месте, а нижнее меню после редеплоя осталось на
+                # «✅ Отпустило». Это и есть «не появилось меню снизу».
+                if ep.user_id not in plated:
+                    try:
+                        await app.bot.send_message(
+                            ep.user_id,
+                            t(ep_lang, "plate_after_stale",
+                              btn_start=t(ep_lang, "btn_start")),
+                            reply_markup=main_keyboard(
+                                _active(ep.user_id) is not None, ep_lang),
+                        )
+                        plated.add(ep.user_id)
+                    except Exception:
+                        pass
             except Exception:
                 pass  # сообщение удалено, слишком старое или уже стальное
         if caught:
-            log.info("Расклеено забытых карточек: %s", caught)
+            log.info("Расклеено забытых карточек: %s, плашек восстановлено: %s",
+                     caught, len(plated))
 
     # Описания команд — на каждом языке плюс дефолтный набор для остальных.
     for lang in i18n.SUPPORTED:

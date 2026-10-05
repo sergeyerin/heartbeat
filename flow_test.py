@@ -378,7 +378,7 @@ async def run() -> None:
     # Карточку запомним: по забытому эпизоду напоминание правит её НА МЕСТЕ
     # (одна поверхность), а не шлёт второе сообщение.
     stale_card = db.get_episode(uid, ep.id).card_msg
-    fake.sent.clear(); fake.edited.clear(); fake.deleted.clear()
+    fake.sent.clear(); fake.edited.clear(); fake.deleted.clear(); fake.markups.clear()
     await JQ.fire(job, fake)
     check(any("окончание не отмечено" in m for m in fake.edited),
           "по забытому эпизоду карточка стала стальной НА МЕСТЕ")
@@ -386,6 +386,9 @@ async def run() -> None:
           "старую карточку не удаляли — одна поверхность, без мерцания")
     check(db.get_episode(uid, ep.id).card_msg == stale_card,
           "та же карточка, не новое сообщение")
+    plate_after = [m for m in fake.markups if m and hasattr(m, "keyboard")]
+    check(plate_after and plate_after[-1].keyboard[0][0].text == t(LANG, "btn_start"),
+          "и нижнее меню вернулось к «Аритмия»")
     check(job not in JQ.store, "забытый эпизод больше не дёргает напоминаниями")
     check(db.active_episode(uid, cfg.STALE_AFTER_MIN) is None,
           "забытый эпизод перестал считаться текущим")
@@ -1419,12 +1422,18 @@ async def run() -> None:
     check(any(e.id == frozen.id
               for e in db.stale_cards_to_refresh(cfg.STALE_AFTER_MIN)),
           "но он в списке карточек для догона")
-    fake.edited.clear()
+    fake.edited.clear(); fake.markups.clear()
     await bot.post_init(SimpleNamespace(bot=fake, job_queue=JQ))
     check(any("окончание не отмечено" in m for m in fake.edited),
           "post_init расклеил замороженную карточку")
     check(db.get_episode(uid, frozen.id).card_msg == f_msg,
           "та же карточка, не новое сообщение")
+    # И вернул нижнее меню: карточка — инлайн, а плашка меняется только новым
+    # сообщением. (Жалоба: «исправилось, но не появилось меню снизу».)
+    plate_sent = [m for m in fake.markups if m and hasattr(m, "keyboard")]
+    check(plate_sent, "post_init прислал сообщение с нижним меню")
+    check(plate_sent[-1].keyboard[0][0].text == t(LANG, "btn_start"),
+          "и меню вернулось к «Аритмия» — эпизод больше не активен")
     db.delete_episode(uid, frozen.id)
 
     # 20. Удаление с подтверждением.
