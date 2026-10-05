@@ -133,8 +133,27 @@ def main() -> int:
         check("в средние значения не входят" in rep_stale, "и не портит ими статистику")
         kb_stale = bot.card_keyboard(hung, LANG)
         texts = [btn.text for row in kb_stale.inline_keyboard for btn in row]
-        check(i18n.t(LANG, "btn_end") not in texts, "забытому эпизоду не предлагают «Отпустило сейчас»")
-        check("⏳ Ещё идёт" in texts and "🤷 Не знаю" in texts, "предлагают длительность и «ещё идёт»")
+        check(i18n.t(LANG, "btn_end") not in texts,
+              "забытому эпизоду не предлагают «Отпустило сейчас»")
+        check(i18n.t(LANG, "btn_how_long") in texts,
+              "вместо этого спрашивают длительность")
+        # Кнопка-заголовок больше не мёртвая: она открывает панель длительности
+        how_long = [b for row in kb_stale.inline_keyboard for b in row
+                    if b.text == i18n.t(LANG, "btn_how_long")][0]
+        check(how_long.callback_data == f"dp:{hung.id}",
+              "и эта кнопка ведёт в панель, а не висит пустой")
+        panel_texts = [b.text for row in bot.duration_panel(hung, LANG).inline_keyboard
+                       for b in row]
+        check("⏳ Ещё идёт" in panel_texts and "🤷 Не знаю" in panel_texts,
+              "варианты длительности и «ещё идёт» — в панели")
+        check(panel_texts[0] == i18n.t(LANG, "btn_card"),
+              "из панели есть выход, иначе подмена клавиатуры была бы тупиком")
+
+        # Карточка во всех состояниях укладывается в четыре ряда: она живая,
+        # человек к ней возвращается, и текст с кнопками должны влезать вместе
+        for state_ep, name in ((hung, "забытый"), (ep, "закрытый")):
+            rows = bot.card_keyboard(state_ep, LANG).inline_keyboard
+            check(len(rows) <= 4, f"карточка ({name}) не больше четырёх рядов: {len(rows)}")
         db.delete_episode(fuid, hung.id)
 
         check(report.human_duration(timedelta(hours=30), LANG) == "1 дн 6 ч", "длительность: сутки")
@@ -194,8 +213,8 @@ def main() -> int:
         sym_board = bot._toggle_keyboard(ep, "sym", LANG).inline_keyboard
         check(len(sym_board) == len(vocab.SYMPTOM_CODES) + 1,
               "в меню симптомов все пункты + «Готово»")
-        check(sym_board[0][0].callback_data == f"c:{ep.id}",
-              "«Готово» первой строкой: меню длинное, снизу кнопка уходит за экран")
+        check(sym_board[0][0].callback_data == f"rf:{ep.id}",
+              "«Готово» первой строкой и ведёт в панель, а не на карточку")
         # Характер ритма — самое информативное для врача, поэтому первым
         check(sym_board[1][0].callback_data.endswith(":irregular"),
               "характер ритма предлагается первым")
@@ -319,6 +338,31 @@ def main() -> int:
         check(corrected.confirmed_at is not None,
               "сдвиг обновляет отметку активности")
         db.delete_episode(fuid, corrected.id)
+
+        # Правка времени окончания: задержка у конца систематическая — человек
+        # жмёт «отпустило» не когда полегчало, а когда вспомнил, и всегда
+        # позже. Без правки это раздувает и сумму, и среднее, и максимум.
+        late = db.start_episode(fuid)
+        db._db().execute("UPDATE episodes SET started_at = ? WHERE id = ?",
+                         (db._iso(db.utcnow() - timedelta(minutes=60)), late.id))
+        db._db().commit()
+        late = db.close_episode(fuid, late.id)
+        check(late.duration() >= timedelta(minutes=59), "записалось 60 минут")
+        moved = db.shift_end(fuid, late.id, -30)
+        check(moved.duration() <= timedelta(minutes=31), "после правки около 30")
+        check(moved.end_approx, "и длительность помечена приблизительной")
+        again = db.shift_end(fuid, late.id, -15)
+        check(again.duration() <= timedelta(minutes=16),
+              "правки складываются: 45 минут набираются двумя нажатиями")
+        # Ноль длительности — выдуманные данные, поэтому отказ, а не подрезание
+        before_refuse = db.get_episode(fuid, late.id).ended_at
+        check(db.shift_end(fuid, late.id, -60) is None,
+              "сдвиг раньше начала отклонён, а не подрезан")
+        check(db.get_episode(fuid, late.id).ended_at == before_refuse,
+              "и время окончания не изменилось")
+        check(db.shift_end(fuid, db.start_episode(fuid).id, -15) is None,
+              "у идущего эпизода окончания нет — двигать нечего")
+        db.delete_episode(fuid, late.id)
 
         # Барьер именно в UPDATE: python-проверка выше короткого замыкания не
         # делает, если состояние изменилось уже после неё (второй инстанс на

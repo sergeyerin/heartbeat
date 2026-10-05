@@ -58,6 +58,10 @@ REPORT_PERIODS = (7, 30, 90)
 # ломает арифметику в клавиатуре.
 DAY_NAV_MIN = date(2020, 1, 1)
 SHIFT_CHOICES = (5, 15, 30)
+# Для окончания шаги крупнее: пятиминутная ошибка здесь ниже собственного шума,
+# а предлагать её — приглашать ковыряться. Реальная задержка это «задремал»
+# (15–30) или «уснул, увлёкся» (45–90), и 45 набирается двумя нажатиями.
+END_SHIFT_CHOICES = (15, 30, 60)
 SEVERITY_LEVELS = (1, 2, 3)
 # Длина названия лекарства — в UTF-16-единицах, как и остальные лимиты
 MED_NAME_LIMIT = 100
@@ -72,7 +76,7 @@ DURATION_CHOICES = (15, 30, 60, 120, 240, 480)
 # ровную десятичасовую длительность как точную.
 NEEDS_ACTIVE = frozenset({"e", "sh"})
 NEEDS_OPEN = frozenset({"ap", "apm", "go", "unk"})
-NEEDS_CLOSED = frozenset({"ro"})
+NEEDS_CLOSED = frozenset({"ro", "se"})
 
 MENU_ACTIONS = ("btn_start", "btn_end", "btn_med", "btn_today", "btn_report", "btn_export")
 # Текст кнопки приходит обратно от Telegram, поэтому разбираем его по всем
@@ -192,10 +196,15 @@ def remind_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
 
 def card_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
     severity = vocab.severity(lang)
+    plain = vocab.severity_plain(lang)
     rows = [
         [
+            # У выбранной оценки лицо ЗАМЕНЯЕТСЯ галочкой, а не дополняется ею:
+            # «✅ 🙂 терпимо» — двенадцать символов, и на телефоне подпись
+            # обрезалась до «✅ 🙂 терп…» (видно на скриншоте пользователя).
+            # Замена и короче, и заметнее: лицо исчезает, это видно издалека.
             InlineKeyboardButton(
-                ("✅ " if ep.severity == level else "") + severity[level],
+                f"✅ {plain[level]}" if ep.severity == level else severity[level],
                 callback_data=f"s:{ep.id}:{level}",
             )
             for level in SEVERITY_LEVELS
@@ -210,6 +219,54 @@ def card_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
                 callback_data=f"n:{ep.id}",
             ),
         ],
+    ]
+
+    # Ряд состояния — единственный, который меняется. Остальные стоят на месте:
+    # карточка живёт одна на эпизод и обновляется сама, человек к ней
+    # ВОЗВРАЩАЕТСЯ, а значит её текст и кнопки должны помещаться на экране
+    # вместе. Семь рядов под восемью строками текста на телефон не влезали.
+    if ep.is_open and ep.is_stale(config.STALE_AFTER_MIN):
+        # Подпись уже была правильной для той кнопки, которой притворялась;
+        # раньше она висела на пустом обработчике и не делала ничего — худшее,
+        # что может быть на карточке у пожилого человека.
+        rows.append([InlineKeyboardButton(t(lang, "btn_how_long"),
+                                          callback_data=f"dp:{ep.id}")])
+    elif ep.is_open:
+        rows.append([InlineKeyboardButton(t(lang, "btn_end"), callback_data=f"e:{ep.id}")])
+    elif _can_reopen(ep):
+        # «Ещё идёт» — отмена случайного нажатия, а не функция: она стирает
+        # время окончания без возврата. На старом эпизоде это портит данные
+        # (нажатие делает его идущим, и следующее запишет неделю длительности),
+        # поэтому кнопку показываем только пока ошибка правдоподобна.
+        rows.append([InlineKeyboardButton(t(lang, "btn_reopen"), callback_data=f"ro:{ep.id}")])
+
+    if _can_shift_end(ep):
+        # Первым рядом, прямо под строкой «✅ Эпизод #5 — 12 мин», которую он и
+        # исправляет. Прятать в панель нельзя: про эту правку надо вспомнить за
+        # минуты, а кнопка в двух нажатиях вглубь под подписью без слова
+        # «время» не будет найдена никем.
+        rows.insert(0, [
+            InlineKeyboardButton(t(lang, "btn_shift_end", minutes=m),
+                                 callback_data=f"se:{ep.id}:-{m}")
+            for m in END_SHIFT_CHOICES
+        ])
+
+    rows.append([
+        InlineKeyboardButton(t(lang, "btn_refine"), callback_data=f"rf:{ep.id}"),
+        InlineKeyboardButton(t(lang, "btn_delete"), callback_data=f"d:{ep.id}"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def refine_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
+    """Панель уточнений: то, что не нужно в момент приступа.
+
+    Открывается подменой ТОЛЬКО клавиатуры: текст карточки остаётся на месте,
+    человек не теряет из виду, какой эпизод правит и что уже заполнено.
+    Выход — наверху, как в меню симптомов, иначе он уезжает за край экрана.
+    """
+    rows = [
+        [InlineKeyboardButton(t(lang, "btn_card"), callback_data=f"c:{ep.id}")],
         [
             InlineKeyboardButton(
                 t(lang, "btn_symptoms") + (f" {len(ep.symptoms)}" if ep.symptoms else ""),
@@ -221,29 +278,26 @@ def card_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
             ),
         ],
     ]
-    if ep.is_open and ep.is_stale(config.STALE_AFTER_MIN):
-        # «Отпустило сейчас» тут было бы ложью: эпизод забыт часы назад.
-        # Спрашиваем длительность, а не время окончания.
-        rows.append([InlineKeyboardButton(t(lang, "btn_how_long"), callback_data="noop")])
-        rows += duration_rows(ep, lang)
-    elif ep.is_open:
-        rows.append([InlineKeyboardButton(t(lang, "btn_end"), callback_data=f"e:{ep.id}")])
-        # Записал не сразу — сдвигаем начало назад.
+    if ep.is_open:
+        # Внутри панели клавиатура стоит на месте, а текст карточки над ней
+        # меняет «Начало: …» — накопить два-три нажатия становится понятно.
         rows.append([
-            InlineKeyboardButton(t(lang, "btn_shift", minutes=m), callback_data=f"sh:{ep.id}:-{m}")
+            InlineKeyboardButton(t(lang, "btn_shift", minutes=m),
+                                 callback_data=f"sh:{ep.id}:-{m}")
             for m in SHIFT_CHOICES
         ])
-    elif _can_reopen(ep):
-        # «Ещё идёт» — отмена случайного нажатия, а не функция: она стирает
-        # время окончания без возврата. На старом эпизоде это портит данные
-        # (нажатие делает его идущим, и следующее запишет неделю длительности),
-        # поэтому кнопку показываем только пока ошибка правдоподобна.
-        rows.append([InlineKeyboardButton(t(lang, "btn_reopen"), callback_data=f"ro:{ep.id}")])
     if ep.lat is not None:
         rows.append([InlineKeyboardButton(t(lang, "btn_place_clear"),
                                           callback_data=f"pc:{ep.id}")])
-    rows.append([InlineKeyboardButton(t(lang, "btn_delete"), callback_data=f"d:{ep.id}")])
     return InlineKeyboardMarkup(rows)
+
+
+def duration_panel(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
+    """Длительности плюс выход: без него подмена клавиатуры была бы тупиком."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(t(lang, "btn_card"), callback_data=f"c:{ep.id}")]]
+        + duration_rows(ep, lang)
+    )
 
 
 def _toggle_keyboard(ep: db.Episode, kind: str, lang: str) -> InlineKeyboardMarkup:
@@ -256,7 +310,9 @@ def _toggle_keyboard(ep: db.Episode, kind: str, lang: str) -> InlineKeyboardMark
     # «Готово» сверху: список длинный (характер ритма + симптомы), и внизу
     # кнопка выхода уходит за пределы экрана — меню заменяет карточку на месте,
     # поэтому другого выхода, кроме этой кнопки, нет.
-    rows = [[InlineKeyboardButton(t(lang, "btn_done"), callback_data=f"c:{ep.id}")]]
+    # «Готово» возвращает в панель, а не на карточку: симптомы и причины —
+    # самая частая пара, и ходить за второй через карточку незачем.
+    rows = [[InlineKeyboardButton(t(lang, "btn_done"), callback_data=f"rf:{ep.id}")]]
     rows += [
         [
             InlineKeyboardButton(
@@ -450,6 +506,16 @@ async def _can_add_episode(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         return False
     return True
+
+
+def _can_shift_end(ep: db.Episode) -> bool:
+    """Окно правки окончания — то же, что у возврата в работу.
+
+    Намеренно вызывает `_can_reopen`, а не повторяет условие: это одна семья
+    исправлений с одним обоснованием (дальше человек уже не помнит), и два
+    отдельных предиката неизбежно разъехались бы.
+    """
+    return _can_reopen(ep)
 
 
 def _can_reopen(ep: db.Episode) -> bool:
@@ -673,11 +739,22 @@ async def _tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     if ep.is_stale(config.STALE_AFTER_MIN) or ep.duration() > timedelta(hours=47):
         job.schedule_removal()
         return
+    # Если открыта панель, перерисовываем ЕЁ: иначе ежеминутное обновление
+    # затирало бы её обычной клавиатурой прямо под пальцем.
+    # context.user_data доступен в задаче, потому что она создана с user_id
+    # (CallbackContext.from_job прокидывает его) — лезть в application не нужно.
+    panel = (context.user_data or {}).get(f"panel:{ep.id}")
+    if panel == "refine":
+        markup = refine_keyboard(ep, lang)
+    elif panel == "duration":
+        markup = duration_panel(ep, lang)
+    else:
+        markup = card_keyboard(ep, lang)
     try:
         await context.bot.edit_message_text(
             report.episode_card(ep, lang),
             chat_id=chat_id, message_id=ep.card_msg,
-            reply_markup=card_keyboard(ep, lang),
+            reply_markup=markup,
         )
     except Exception as exc:
         if "not modified" in str(exc):
@@ -1484,9 +1561,28 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             if "not modified" not in str(exc):
                 log.warning("Переключатель не обновился: %s", exc)
         return
-    if action == "c":
+    if action == "rf":  # панель уточнений
+        context.user_data[f"panel:{episode_id}"] = "refine"
         await ack()
-        await _refresh(query, ep, lang)
+        try:
+            await query.edit_message_reply_markup(reply_markup=refine_keyboard(ep, lang))
+        except Exception as exc:
+            if "not modified" not in str(exc):
+                log.warning("Панель уточнений не открылась: %s", exc)
+        return
+    if action == "dp":  # панель длительности у забытого эпизода
+        context.user_data[f"panel:{episode_id}"] = "duration"
+        await ack()
+        try:
+            await query.edit_message_reply_markup(reply_markup=duration_panel(ep, lang))
+        except Exception as exc:
+            if "not modified" not in str(exc):
+                log.warning("Панель длительности не открылась: %s", exc)
+        return
+    if action == "c":  # возврат к карточке
+        context.user_data.pop(f"panel:{episode_id}", None)
+        await ack()
+        await _refresh(query, ep, lang, context)
         return
     if action == "e":
         closed = db.close_episode(user_id, episode_id)
@@ -1614,6 +1710,25 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             t(lang, "done"),
             reply_markup=main_keyboard(_active(user_id) is not None, lang),
         )
+        return
+    if action == "se":  # правка времени окончания
+        minutes = _arg(parts, 2, tuple(-m for m in END_SHIFT_CHOICES))
+        if minutes is None:
+            await ack()
+            return
+        # Окно проверяем и здесь: payload недоверенный, а кнопка остаётся в
+        # истории чата навсегда — та же дисциплина, что у `ro`.
+        if not _can_shift_end(ep):
+            await ack(t(lang, "reopen_too_old"))
+            await _refresh(query, ep, lang, context)
+            return
+        moved = db.shift_end(user_id, episode_id, minutes)
+        if moved is None:
+            # Отказ, а не подрезание: эпизод нулевой длительности — выдумка.
+            await ack(t(lang, "end_before_start", time=report.hhmm(ep.started_at)))
+            return
+        await ack(t(lang, "ack_end_set", time=report.hhmm(moved.ended_at)))
+        await _refresh(query, moved, lang, context)
         return
     if action == "sh":
         minutes = _arg(parts, 2, tuple(-m for m in SHIFT_CHOICES))

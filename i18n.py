@@ -60,7 +60,17 @@ STRINGS: dict[str, dict[str, str]] = {
     # несёт сама иконка: другого времени у идущего эпизода ещё нет.
     "btn_shift": {"ru": "⏪ −{minutes} мин", "en": "⏪ −{minutes} min",
 },
-    "btn_reopen": {"ru": "↩️ Ещё идёт", "en": "↩️ Still ongoing"},
+    # Не «Ещё идёт»: это отмена ошибочного нажатия, а не продолжение эпизода,
+    # и прежняя подпись дословно совпадала с btn_still_on, у которой другое
+    # действие. Новая читается как исправление и спутать её нельзя.
+    # ✅ значит «отпустило» во всём продукте, ⏪ — про начало. Два ряда никогда
+    # не встречаются на одной карточке, поэтому значок сам говорит, какое
+    # время двигается, и подпись остаётся девятисимвольной.
+    "btn_shift_end": {"ru": "✅ −{minutes} мин", "en": "✅ −{minutes} min"},
+    "ack_end_set": {"ru": "Отпустило: {time}", "en": "Stopped at: {time}"},
+    "end_before_start": {"ru": "Раньше начала не бывает — начало {time}.",
+                         "en": "That's before the start ({time})."},
+    "btn_reopen": {"ru": "↩️ Ещё не отпустило", "en": "↩️ It hasn't stopped yet"},
     "btn_delete": {"ru": "🗑 Удалить", "en": "🗑 Delete"},
     "btn_done": {"ru": "← Готово", "en": "← Done"},
     # «Отмена» в подтверждении удаления двусмысленна (отменить удаление или
@@ -74,6 +84,8 @@ STRINGS: dict[str, dict[str, str]] = {
     "btn_dont_remember": {"ru": "🤷 Не помню, когда прошло",
                           "en": "🤷 Don't remember when it stopped",
 },
+    "btn_refine": {"ru": "➕ Уточнить", "en": "➕ Add details"},
+    "btn_card": {"ru": "← К эпизоду", "en": "← Back to episode"},
     "btn_clear_note": {"ru": "🗑 Очистить заметку", "en": "🗑 Clear the note",
 },
     "btn_cancel": {"ru": "← Отмена", "en": "← Cancel"},
@@ -100,7 +112,8 @@ STRINGS: dict[str, dict[str, str]] = {
               "• просто текст — заметка к текущему эпизоду;\n"
               "• «{btn_today}» — что было за день, «{btn_report}» — статистика, "
               "«{btn_export}» — CSV для врача.\n\n"
-              "Записал не сразу? На карточке есть «⏪ начало −5/−15/−30 мин».\n\n"
+              "Записали не сразу? На карточке есть «⏪ −5/−15/−30 мин» для начала "
+              "и «✅ −15/−30/−60 мин» для окончания.\n\n"
               "⚕️ Я дневник, а не медицинская рекомендация: я записываю то, что вы "
               "мне говорите, и ничего не оцениваю и не советую. Решения обсуждайте "
               "с врачом. Записи хранятся на сервере бота, у каждого свои.\n"
@@ -115,7 +128,8 @@ STRINGS: dict[str, dict[str, str]] = {
               "• send plain text — it becomes a note on the current episode;\n"
               "• «{btn_today}» shows the day, «{btn_report}» the statistics, "
               "«{btn_export}» a CSV for your doctor.\n\n"
-              "Logged it late? The card has «⏪ start −5/−15/−30 min».\n\n"
+              "Logged it late? The card has «⏪ −5/−15/−30 min» for the start "
+              "and «✅ −15/−30/−60 min» for the end.\n\n"
               "⚕️ I am a diary, not medical advice: I record what you tell me and "
               "never assess or recommend anything. Discuss decisions with your "
               "doctor. Records are kept on the bot's server, separately per "
@@ -135,7 +149,8 @@ STRINGS: dict[str, dict[str, str]] = {
               "/forget — удалить все мои записи\n"
               "/cancel — отменить ожидание ввода\n\n"
               "Мелкие удобства: число в чат — это пульс, текст — заметка к "
-              "текущему эпизоду, «📍 Место» — где это было.\n\n"
+              "текущему эпизоду, «📍 Место» — где это было. Время можно "
+              "поправить: «⏪» двигает начало, «✅ −N мин» — окончание.\n\n"
               "Что я храню: времена эпизодов, тяжесть, пульс, симптомы, причины, "
               "заметки, приёмы лекарств и места, если вы их отмечали. Всё это "
               "лежит на сервере бота и удаляется целиком командой /forget.\n\n"
@@ -152,7 +167,8 @@ STRINGS: dict[str, dict[str, str]] = {
               "/forget — delete all my records\n"
               "/cancel — cancel a pending input\n\n"
               "Shortcuts: a bare number is your pulse, plain text becomes a note on "
-              "the current episode, «📍 Place» records where it happened.\n\n"
+              "the current episode, «📍 Place» records where it happened. Times are "
+              "correctable: «⏪» moves the start, «✅ −N min» the end.\n\n"
               "What I store: episode times, severity, pulse, symptoms, triggers, "
               "notes, medication entries, and places if you marked them. It all "
               "lives on the bot's server and /forget deletes the lot.\n\n"

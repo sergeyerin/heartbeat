@@ -112,7 +112,10 @@ def episode_card(ep: Episode, lang: str) -> str:
         lines.append(t(lang, "card_start", day=_day_prefix(ep.started_at, lang),
                        time=hhmm(ep.started_at)))
         lines.append(t(lang, "card_unknown_dur", dur=human_duration(ep.duration(now), lang)))
-        lines.append(t(lang, "card_stale_hint"))
+        # Подсказка «отметьте кнопкой ниже» убрана: кнопка «⏱ Сколько длилось?»
+        # теперь живая и находится прямо под этой строкой — текст сообщал бы
+        # человеку нажать то, на что он и так смотрит, занимая строку на самой
+        # перегруженной карточке.
     elif ep.is_open:
         # Секунды на открытой карточке не нужны: «идёт, уже 6 сек» — это шум,
         # а карточка всё равно обновляется раз в минуту.

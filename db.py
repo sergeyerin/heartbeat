@@ -543,6 +543,34 @@ def shift_start(user_id: int, episode_id: int, minutes: int) -> Episode | None:
     return get_episode(user_id, episode_id)
 
 
+def shift_end(user_id: int, episode_id: int, minutes: int) -> Episode | None:
+    """Сдвигает время ОКОНЧАНИЯ закрытого эпизода назад.
+
+    Задержка у конца — систематическая: человек нажимает «отпустило» не когда
+    полегчало, а когда вспомнил, и всегда позже, никогда раньше. За месяц это
+    не усредняется, а раздувает и сумму, и среднее, и максимум.
+
+    Отказывает, а не подрезает: подрезание до начала дало бы эпизод нулевой
+    длительности — выдуманные данные. И всегда помечает длительность
+    приблизительной: время, названное по памяти, это оценка.
+    """
+    ep = get_episode(user_id, episode_id)
+    if ep is None or ep.is_open or ep.ended_at is None:
+        return None
+    ended = ep.ended_at + timedelta(minutes=minutes)
+    if ended <= ep.started_at:
+        return None
+    cur = _db().execute(
+        "UPDATE episodes SET ended_at = ?, end_approx = 1 "
+        "WHERE id = ? AND user_id = ? AND ended_at IS NOT NULL",
+        (_iso(ended), episode_id, user_id),
+    )
+    _db().commit()
+    if cur.rowcount == 0:
+        return None
+    return get_episode(user_id, episode_id)
+
+
 def delete_episode(user_id: int, episode_id: int) -> bool:
     cur = _db().execute(
         "DELETE FROM episodes WHERE id = ? AND user_id = ?", (episode_id, user_id)

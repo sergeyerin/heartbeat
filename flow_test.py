@@ -146,6 +146,7 @@ class FakeJobQueue:
 
     def __init__(self) -> None:
         self.store: dict[str, dict] = {}
+        self.user_data: dict = {}
 
     def run_once(self, callback, when, chat_id=None, user_id=None, data=None,
                  name=None, job_kwargs=None):
@@ -185,7 +186,9 @@ class FakeJobQueue:
         job = SimpleNamespace(data=spec["data"], user_id=spec["user_id"],
                               chat_id=spec["chat_id"],
                               schedule_removal=lambda: removed.append(True))
-        await bot._tick(SimpleNamespace(bot=fake, job=job, job_queue=self))
+        # user_data — как у настоящей задачи, созданной с user_id
+        await bot._tick(SimpleNamespace(bot=fake, job=job, job_queue=self,
+                                        user_data=self.user_data))
         if removed:
             self.store.pop(name, None)
         return not removed
@@ -834,9 +837,12 @@ async def run() -> None:
     csv_geo = report.episodes_csv([stored], [], LANG).decode("utf-8-sig")
     check("55.75124" in csv_geo, "координаты попали в выгрузку")
     # Убрать место можно — координаты это данные, их должно быть можно забрать
-    geo_board = [b for row in bot.card_keyboard(stored, LANG).inline_keyboard for b in row]
+    geo_board = [b for row in bot.refine_keyboard(stored, LANG).inline_keyboard for b in row]
     check(any(b.callback_data == f"pc:{geo_ep.id}" for b in geo_board),
-          "на карточке есть кнопка «убрать место»")
+          "кнопка «убрать место» есть в панели уточнений")
+    card_board = [b.callback_data for row in
+                  bot.card_keyboard(stored, LANG).inline_keyboard for b in row]
+    check(f"rf:{geo_ep.id}" in card_board, "а на карточку ведёт одна кнопка «Уточнить»")
     await press(f"pc:{geo_ep.id}")
     check(db.get_episode(uid, geo_ep.id).lat is None, "место убрано по кнопке")
     # Без активного эпизода бот объясняет, а не молчит
@@ -1008,10 +1014,14 @@ async def run() -> None:
     for needed, why in ((f"s:{fresh_closed.id}:3", "тяжесть"),
                         (f"p:{fresh_closed.id}", "пульс"),
                         (f"n:{fresh_closed.id}", "заметка"),
-                        (f"m:{fresh_closed.id}:sym", "симптомы"),
-                        (f"m:{fresh_closed.id}:trg", "причины"),
+                        (f"rf:{fresh_closed.id}", "панель уточнений"),
                         (f"d:{fresh_closed.id}", "удаление")):
         check(needed in fresh_btns, f"на закрытом эпизоде остаётся {why}")
+    panel_btns = [b.callback_data for row in
+                  bot.refine_keyboard(fresh_closed, LANG).inline_keyboard for b in row]
+    for needed, why in ((f"m:{fresh_closed.id}:sym", "симптомы"),
+                        (f"m:{fresh_closed.id}:trg", "причины")):
+        check(needed in panel_btns, f"а {why} — в панели, в одном нажатии")
     check(f"ro:{fresh_closed.id}" in fresh_btns,
           "только что закрытый можно вернуть в работу — это отмена опечатки")
 
@@ -1031,6 +1041,94 @@ async def run() -> None:
           "и подделанный payload его не открывает")
     check(t(LANG, "reopen_too_old") in fake.answers, "с объяснением почему")
     db.delete_episode(uid, fresh_closed.id); db.delete_episode(uid, old_closed.id)
+
+    # 19k. Панель уточнений: открывается подменой клавиатуры, текст карточки
+    # остаётся на месте, и ежеминутное обновление её не затирает.
+    while bot._current_episode(uid) is not None:
+        cur = bot._current_episode(uid)
+        db.close_episode(uid, cur.id)
+        age_out(uid, cur.id, days=3)
+    JQ.store.clear()
+    await tap(t(LANG, "btn_start"))
+    panel_ep = db.active_episode(uid, cfg.STALE_AFTER_MIN)
+    card_rows = bot.card_keyboard(panel_ep, LANG).inline_keyboard
+    check(len(card_rows) == 4, f"карточка в четыре ряда ({len(card_rows)})")
+    fake.markups.clear(); fake.sent.clear()
+    await press(f"rf:{panel_ep.id}")
+    check(ud.get(f"panel:{panel_ep.id}") == "refine", "панель помечена открытой")
+    check(not fake.sent, "панель не присылает новых сообщений")
+    opened = [b.callback_data for m in fake.markups if m
+              for row in getattr(m, "inline_keyboard", []) for b in row]
+    check(f"m:{panel_ep.id}:sym" in opened, "в панели симптомы")
+    check(f"sh:{panel_ep.id}:-30" in opened, "и сдвиг начала")
+    check(opened and opened[0] == f"c:{panel_ep.id}", "выход — первой строкой")
+
+    # Тик не затирает открытую панель
+    JQ.user_data = ud
+    fake.markups.clear()
+    tick_name = f"tick:{uid}:{panel_ep.id}"
+    db.shift_start(uid, panel_ep.id, -3)
+    await JQ.tick(tick_name, fake)
+    after_tick = [b.callback_data for m in fake.markups if m
+                  for row in getattr(m, "inline_keyboard", []) for b in row]
+    check(f"m:{panel_ep.id}:sym" in after_tick,
+          f"после обновления панель осталась открытой ({after_tick[:3]})")
+
+    # Выход возвращает карточку и снимает отметку
+    await press(f"c:{panel_ep.id}")
+    check(f"panel:{panel_ep.id}" not in ud, "отметка снята")
+    # «Готово» из меню симптомов ведёт обратно в панель, а не на карточку
+    sym_done = bot._toggle_keyboard(panel_ep, "sym", LANG).inline_keyboard[0][0]
+    check(sym_done.callback_data == f"rf:{panel_ep.id}",
+          "«Готово» из симптомов возвращает в панель")
+    db.close_episode(uid, panel_ep.id); db.delete_episode(uid, panel_ep.id)
+
+    # 19l. Правка окончания — на карточке, а не в панели: про неё надо
+    # вспомнить за минуты, и спрятанную кнопку не найдёт никто.
+    while bot._current_episode(uid) is not None:
+        cur = bot._current_episode(uid)
+        db.close_episode(uid, cur.id)
+        age_out(uid, cur.id, days=3)
+    late_ep = db.start_episode(uid)
+    db._db().execute("UPDATE episodes SET started_at = ? WHERE id = ?",
+                     (db._iso(db.utcnow() - timedelta(minutes=50)), late_ep.id))
+    db._db().commit()
+    db.close_episode(uid, late_ep.id)
+    late_ep = db.get_episode(uid, late_ep.id)
+    rows = bot.card_keyboard(late_ep, LANG).inline_keyboard
+    check(rows[0][0].callback_data == f"se:{late_ep.id}:-15",
+          "правка окончания — первым рядом, под строкой с длительностью")
+    panel_data = [b.callback_data for row in
+                  bot.refine_keyboard(late_ep, LANG).inline_keyboard for b in row]
+    check(not any((c or "").startswith("se:") for c in panel_data),
+          "и её нет в панели — там её не нашли бы")
+    await press(f"se:{late_ep.id}:-30")
+    check(db.get_episode(uid, late_ep.id).duration() <= timedelta(minutes=21),
+          "нажатие сдвинуло окончание")
+    check(db.get_episode(uid, late_ep.id).end_approx,
+          "и пометило длительность приблизительной")
+    fake.answers.clear()
+    await press(f"se:{late_ep.id}:-60")
+    check(any(t(LANG, "end_before_start", time=report.hhmm(late_ep.started_at)) in a
+              for a in fake.answers),
+          f"сдвиг раньше начала объяснён, а не выполнен ({fake.answers})")
+    # Подделанный шаг не проходит
+    before_bad = db.get_episode(uid, late_ep.id).ended_at
+    await press(f"se:{late_ep.id}:-7")
+    check(db.get_episode(uid, late_ep.id).ended_at == before_bad,
+          "шаг не из набора отклонён")
+    # У давно закрытого эпизода правки уже нет
+    age_out(uid, late_ep.id, days=3)
+    old_rows = [b.callback_data for row in
+                bot.card_keyboard(db.get_episode(uid, late_ep.id), LANG).inline_keyboard
+                for b in row]
+    check(not any((c or "").startswith("se:") for c in old_rows),
+          "у давно закрытого эпизода правка окончания не предлагается")
+    fake.answers.clear()
+    await press(f"se:{late_ep.id}:-15")
+    check(t(LANG, "reopen_too_old") in fake.answers,
+          "и подделанный payload её не выполняет")
+    db.delete_episode(uid, late_ep.id)
 
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять
