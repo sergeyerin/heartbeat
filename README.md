@@ -110,6 +110,13 @@ more than `RECENT_EPISODE_MIN` minutes ago (3 hours by default).
   Excel and Google Sheets open it without encoding games). Handy to hand to a
   cardiologist.
 
+## Deleting your data
+
+`/forget` wipes everything: episodes, medication entries, notes, places and the
+language choice, after a two-step confirmation that shows the counts first. There
+is no undo, so the bot suggests `/export` before. Nothing is kept about you
+afterwards.
+
 ## Privacy
 
 The bot is open to everyone, but diaries are isolated: every record is keyed by

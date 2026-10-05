@@ -340,6 +340,40 @@ STRINGS: dict[str, dict[str, str]] = {
               "number if that was your pulse. The file itself is still in this "
               "chat, it is not lost.",
     },
+    "forget_confirm": {
+        "ru": "Удалить все мои записи?\n\nЭпизодов: {episodes}, отметок о лекарствах: "
+              "{meds}. Удалится всё: времена, тяжесть, пульс, симптомы, заметки, "
+              "места, выбранный язык. Это необратимо, и отменить я не смогу.\n"
+              "Если нужна копия — сначала /export.",
+        "en": "Delete everything I have logged?\n\nEpisodes: {episodes}, medication "
+              "entries: {meds}. All of it goes: times, severity, pulse, symptoms, "
+              "notes, places, language choice. This cannot be undone.\n"
+              "If you want a copy, run /export first.",
+    },
+    "btn_forget_yes": {"ru": "🗑 Да, удалить всё", "en": "🗑 Yes, delete everything"},
+    "forget_done": {"ru": "Удалил всё: эпизодов {episodes}, отметок о лекарствах "
+                          "{meds}. Дневник пуст.",
+                    "en": "Deleted everything: {episodes} episodes, {meds} medication "
+                          "entries. The diary is empty."},
+    "forget_empty": {"ru": "Удалять нечего — записей нет.",
+                     "en": "Nothing to delete — there are no records."},
+    "too_fast": {"ru": "Слишком часто — подождите секунду.",
+                 "en": "Too fast — give it a second."},
+    "too_many_episodes": {
+        "ru": "В дневнике уже {n} эпизодов — это предел. Выгрузите и удалите старые "
+              "(/export, затем /forget), и можно писать дальше.",
+        "en": "The diary already holds {n} episodes, which is the limit. Export and "
+              "delete the old ones (/export, then /forget) to carry on.",
+    },
+    "too_many_open": {
+        "ru": "Уже {n} незакрытых эпизодов. Закройте или уточните длительность хотя "
+              "бы у одного — иначе дневник превращается в кашу.",
+        "en": "There are already {n} unclosed episodes. Close one or give it a "
+              "duration — otherwise the diary turns to mush.",
+    },
+    "export_cooldown": {"ru": "Выгрузку только что делали — подождите минуту.",
+                        "en": "You exported just now — give it a minute."},
+    "cmd_forget": {"ru": "удалить все мои записи", "en": "delete all my records"},
     "nothing_to_export": {"ru": "Пока нечего выгружать — записей нет.",
                           "en": "Nothing to export yet — no records.",
 },

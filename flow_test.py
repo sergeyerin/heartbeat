@@ -13,6 +13,10 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "flow")
+# Прогон жмёт кнопки за миллисекунды — предохранитель «не чаще раза в N секунд»
+# иначе отклонял бы половину сценария. Сам предохранитель проверяется отдельно.
+os.environ.setdefault("MIN_ACTION_INTERVAL_SEC", "0")
+os.environ.setdefault("EXPORT_COOLDOWN_SEC", "0")
 os.environ.setdefault("TZ", "Europe/Moscow")
 
 from telegram import (  # noqa: E402
@@ -136,41 +140,49 @@ class FakeJobQueue:
     """Ловит запланированные напоминания, не запуская планировщик."""
 
     def __init__(self) -> None:
-        self.jobs: dict[str, dict] = {}
+        self.store: dict[str, dict] = {}
 
     def run_once(self, callback, when, chat_id=None, user_id=None, data=None,
                  name=None, job_kwargs=None):
-        self.jobs[name] = {"callback": callback, "when": when, "chat_id": chat_id,
+        self.store[name] = {"callback": callback, "when": when, "chat_id": chat_id,
                            "user_id": user_id, "data": data, "name": name,
                            "job_kwargs": job_kwargs or {}}
 
     def run_repeating(self, callback, interval, first=None, chat_id=None,
                       user_id=None, data=None, name=None, job_kwargs=None):
-        self.jobs[name] = {"callback": callback, "interval": interval, "first": first,
+        self.store[name] = {"callback": callback, "interval": interval, "first": first,
                            "chat_id": chat_id, "user_id": user_id, "data": data,
                            "name": name, "job_kwargs": job_kwargs or {},
                            "repeating": True}
 
+    def jobs(self):
+        """Как в PTB: список всех задач."""
+        return [
+            SimpleNamespace(name=n,
+                            schedule_removal=lambda n=n: self.store.pop(n, None))
+            for n in list(self.store)
+        ]
+
     def get_jobs_by_name(self, name):
-        job = self.jobs.get(name)
-        return [SimpleNamespace(schedule_removal=lambda n=name: self.jobs.pop(n, None))] if job else []
+        job = self.store.get(name)
+        return [SimpleNamespace(schedule_removal=lambda n=name: self.store.pop(n, None))] if job else []
 
     async def fire(self, name, fake):
         """Выполняет напоминание так, как это сделал бы планировщик."""
-        spec = self.jobs.pop(name)
+        spec = self.store.pop(name)
         job = SimpleNamespace(data=spec["data"], user_id=spec["user_id"], chat_id=spec["chat_id"])
         await bot._remind(SimpleNamespace(bot=fake, job=job, job_queue=self))
 
     async def tick(self, name, fake):
         """Выполняет обновление живой карточки; задача остаётся запланированной."""
-        spec = self.jobs[name]
+        spec = self.store[name]
         removed = []
         job = SimpleNamespace(data=spec["data"], user_id=spec["user_id"],
                               chat_id=spec["chat_id"],
                               schedule_removal=lambda: removed.append(True))
         await bot._tick(SimpleNamespace(bot=fake, job=job, job_queue=self))
         if removed:
-            self.jobs.pop(name, None)
+            self.store.pop(name, None)
         return not removed
 
 
@@ -304,20 +316,20 @@ async def run() -> None:
     await tap(t(LANG, "btn_start"))
     ep = db.active_episode(uid, cfg.STALE_AFTER_MIN)
     job = f"remind:{uid}:{ep.id}"
-    check(job in JQ.jobs, "на новый эпизод поставлено напоминание «отпустило?»")
-    check(JQ.jobs[job]["when"] == timedelta(minutes=cfg.EPISODE_WINDOW_MIN),
+    check(job in JQ.store, "на новый эпизод поставлено напоминание «отпустило?»")
+    check(JQ.store[job]["when"] == timedelta(minutes=cfg.EPISODE_WINDOW_MIN),
           f"напоминание через {cfg.EPISODE_WINDOW_MIN} мин")
-    check(JQ.jobs[job]["data"].get("final") is False, "это обычный вопрос, не контрольный")
+    check(JQ.store[job]["data"].get("final") is False, "это обычный вопрос, не контрольный")
     # APScheduler по умолчанию выбрасывает задачу, опоздавшую больше секунды
-    check(JQ.jobs[job]["job_kwargs"].get("misfire_grace_time", "missing") is None,
+    check(JQ.store[job]["job_kwargs"].get("misfire_grace_time", "missing") is None,
           "опоздавшее напоминание не выбрасывается планировщиком")
 
     # Сработало напоминание, эпизод ещё идёт.
     await JQ.fire(job, fake)
     check(any("Отпустило?" in t for t in fake.sent), "бот сам спросил, отпустило ли")
-    check(job in JQ.jobs and JQ.jobs[job]["data"]["final"] is True,
+    check(job in JQ.store and JQ.store[job]["data"]["final"] is True,
           "после вопроса запланирован один контрольный заход, а не повтор")
-    check(JQ.jobs[job]["when"] == timedelta(minutes=cfg.EPISODE_WINDOW_MIN),
+    check(JQ.store[job]["when"] == timedelta(minutes=cfg.EPISODE_WINDOW_MIN),
           "контрольный заход — через то же окно")
 
     # «Ещё идёт» — эпизод продлевается на окно, начало не трогается.
@@ -325,9 +337,9 @@ async def run() -> None:
     await press(f"go:{ep.id}")
     check(db.get_episode(uid, ep.id).started_at == started, "«ещё идёт» не сдвинуло начало")
     check(db.active_episode(uid, cfg.STALE_AFTER_MIN) is not None, "эпизод всё ещё активен")
-    check(JQ.jobs[job]["when"] == timedelta(minutes=cfg.EPISODE_WINDOW_MIN),
+    check(JQ.store[job]["when"] == timedelta(minutes=cfg.EPISODE_WINDOW_MIN),
           f"«ещё идёт» продлил эпизод на {cfg.EPISODE_WINDOW_MIN} мин")
-    check(JQ.jobs[job]["data"].get("final") is False,
+    check(JQ.store[job]["data"].get("final") is False,
           "после продления снова обычный вопрос, а не контрольный")
     check(any("продолжается" in t for t in fake.edited), "бот подтвердил продление")
 
@@ -343,7 +355,7 @@ async def run() -> None:
     await JQ.fire(job, fake)
     check(any("без отметки окончания" in t for t in fake.sent),
           "по забытому эпизоду бот прислал вопрос о длительности")
-    check(job not in JQ.jobs, "забытый эпизод больше не дёргает напоминаниями")
+    check(job not in JQ.store, "забытый эпизод больше не дёргает напоминаниями")
     check(db.active_episode(uid, cfg.STALE_AFTER_MIN) is None,
           "забытый эпизод перестал считаться текущим")
 
@@ -355,8 +367,16 @@ async def run() -> None:
           "новый эпизод записывается, несмотря на забытый старый")
     new_ep = db.active_episode(uid, cfg.STALE_AFTER_MIN)
     check(new_ep.id != ep.id, "записался именно новый эпизод")
-    check(any("остался без окончания" in t for t in fake.sent),
-          "бот напомнил про забытый эпизод, не мешая записать новый")
+    # Напоминание о забытом эпизоде НЕ должно приходить в момент нового приступа
+    check(not any("остался без окончания" in m for m in fake.sent),
+          "в момент приступа бот не разбирает старый бэклог")
+    check(len(fake.sent) <= 2,
+          f"на одно нажатие — не больше двух сообщений ({len(fake.sent)})")
+    # Зато приходит, когда человек сам пришёл смотреть записи
+    fake.sent.clear()
+    await tap(t(LANG, "btn_today"))
+    check(any("остался без окончания" in m for m in fake.sent),
+          "в «Сегодня» напоминание о забытом эпизоде приходит")
 
     # Свободный ввод уходит в новый эпизод, а не в забытый.
     await tap("130")
@@ -375,7 +395,7 @@ async def run() -> None:
     await press(f"unk:{unknown.id}")
     check(db.get_episode(uid, unknown.id) is not None, "эпизод «без окончания» сохранён")
     check(db.get_episode(uid, unknown.id).is_open, "и остался без времени окончания")
-    check(f"remind:{uid}:{unknown.id}" not in JQ.jobs, "напоминания по нему выключены")
+    check(f"remind:{uid}:{unknown.id}" not in JQ.store, "напоминания по нему выключены")
     db.delete_episode(uid, unknown.id)
     await press(f"e:{new_ep.id}")
 
@@ -393,12 +413,12 @@ async def run() -> None:
     check(any("01.01.2026" in t for t in fake.edited), "листание по дням работает")
 
     # 14. Рестарт контейнера: напоминания по открытым эпизодам ставятся заново.
-    JQ.jobs.clear()
+    JQ.store.clear()
     live = db.start_episode(uid)
     forgotten_long = db.start_episode(uid, started_at=db.utcnow() - timedelta(hours=20))
     await bot.post_init(SimpleNamespace(bot=fake, job_queue=JQ))
-    check(f"remind:{uid}:{live.id}" in JQ.jobs, "после рестарта напоминание восстановлено")
-    check(f"remind:{uid}:{forgotten_long.id}" not in JQ.jobs,
+    check(f"remind:{uid}:{live.id}" in JQ.store, "после рестарта напоминание восстановлено")
+    check(f"remind:{uid}:{forgotten_long.id}" not in JQ.store,
           "забытому эпизоду напоминание не ставится")
     db.delete_episode(uid, live.id); db.delete_episode(uid, forgotten_long.id)
 
@@ -708,6 +728,33 @@ async def run() -> None:
     check(not reopened_unk.end_unknown, "возврат в работу снимает отметку «не знаю»")
     db.delete_episode(uid, forgotten_ok.id)
 
+    # 19b3. Этап вопроса живёт в БД: после рестарта бот не спрашивает заново.
+    staged = db.start_episode(uid)
+    check(db.get_episode(uid, staged.id).remind_stage == 0, "вопрос ещё не задан")
+    sjob = f"remind:{uid}:{staged.id}"
+    JQ.store[sjob] = {"callback": bot._remind, "when": timedelta(minutes=30),
+                     "chat_id": uid, "user_id": uid,
+                     "data": {"episode_id": staged.id, "final": False},
+                     "name": sjob, "job_kwargs": {}}
+    fake.sent.clear()
+    await JQ.fire(sjob, fake)
+    check(db.get_episode(uid, staged.id).remind_stage == 1, "после вопроса этап записан")
+    # Имитируем рестарт: задача потеряна, post_init ставит её заново
+    JQ.store.clear()
+    await bot.post_init(SimpleNamespace(bot=fake, job_queue=JQ))
+    check(JQ.store[sjob]["data"]["final"] is True,
+          "после рестарта запланирован контрольный заход, а не повторный вопрос")
+    fake.sent.clear()
+    await JQ.fire(sjob, fake)
+    check(not any("Отпустило?" in m for m in fake.sent),
+          f"и вопрос не задаётся повторно ({fake.sent})")
+    # «Ещё идёт» начинает цикл заново
+    db.set_remind_stage(uid, staged.id, 1)
+    await press(f"go:{staged.id}")
+    check(db.get_episode(uid, staged.id).remind_stage == 0,
+          "«ещё идёт» сбрасывает этап: цикл вопросов начинается заново")
+    db.delete_episode(uid, staged.id)
+
     # 19c. Второй рубеж на уровне БД: «ещё идёт» и сдвиг начала отклоняются,
     # если эпизод закрыли в обход функции (второй инстанс на том же файле).
     raced = db.start_episode(uid)
@@ -803,12 +850,12 @@ async def run() -> None:
         cur = bot._current_episode(uid)
         db.close_episode(uid, cur.id)
         age_out(uid, cur.id, days=3)
-    JQ.jobs.clear(); fake.sent.clear(); fake.edited.clear()
+    JQ.store.clear(); fake.sent.clear(); fake.edited.clear()
     await tap(t(LANG, "btn_start"))
     live = db.active_episode(uid, cfg.STALE_AFTER_MIN)
     tick_job = f"tick:{uid}:{live.id}"
-    check(tick_job in JQ.jobs, "на идущий эпизод поставлено обновление карточки")
-    check(JQ.jobs[tick_job]["interval"] == timedelta(seconds=cfg.CARD_TICK_SEC),
+    check(tick_job in JQ.store, "на идущий эпизод поставлено обновление карточки")
+    check(JQ.store[tick_job]["interval"] == timedelta(seconds=cfg.CARD_TICK_SEC),
           f"интервал обновления {cfg.CARD_TICK_SEC} с, а не каждую секунду")
     check(db.get_episode(uid, live.id).card_msg is not None,
           "бот запомнил, какое сообщение править")
@@ -835,9 +882,9 @@ async def run() -> None:
 
     # Эпизод закрыт — обновление прекращается
     await press(f"e:{live.id}")
-    check(tick_job not in JQ.jobs, "после закрытия карточка больше не обновляется")
+    check(tick_job not in JQ.store, "после закрытия карточка больше не обновляется")
     # А если задача всё же сработает — она сама себя снимет
-    JQ.jobs[tick_job] = {"callback": bot._tick, "interval": timedelta(seconds=60),
+    JQ.store[tick_job] = {"callback": bot._tick, "interval": timedelta(seconds=60),
                          "first": None, "chat_id": uid, "user_id": uid,
                          "data": {"episode_id": live.id}, "name": tick_job,
                          "job_kwargs": {}, "repeating": True}
@@ -845,7 +892,73 @@ async def run() -> None:
           "задача обновления снимает себя сама на закрытом эпизоде")
     db.delete_episode(uid, live.id)
 
+    # 19g. Предохранители: один человек не должен мешать остальным.
+    saved_interval = cfg.MIN_ACTION_INTERVAL_SEC
+    cfg.MIN_ACTION_INTERVAL_SEC = 60
+    ud_rl: dict = {}
+    fake.sent.clear()
+    await bot.action_start_episode(text_update(fake, "/log"), make_context(fake, ud_rl))
+    before_rl = db.count_episodes(uid)
+    await bot.action_start_episode(text_update(fake, "/log"), make_context(fake, ud_rl))
+    check(db.count_episodes(uid) == before_rl, "второе нажатие подряд отклонено")
+    check(any(t(LANG, "too_fast") in m for m in fake.sent), "и объяснено, а не молча")
+    cfg.MIN_ACTION_INTERVAL_SEC = saved_interval
+
+    saved_open = cfg.MAX_OPEN_EPISODES
+    cfg.MAX_OPEN_EPISODES = 2
+    while bot._current_episode(uid) is not None:
+        cur = bot._current_episode(uid)
+        db.close_episode(uid, cur.id)
+        age_out(uid, cur.id, days=3)
+    # Именно забытые открытые: активный эпизод короткое замыкание даёт раньше
+    # (бот отвечает «уже идёт»), а копятся как раз брошенные.
+    openers = [db.start_episode(uid) for _ in range(2)]
+    for o in openers:
+        age_out(uid, o.id, days=2)
+        db._db().execute("UPDATE episodes SET ended_at = NULL WHERE id = ?", (o.id,))
+    db._db().commit()
+    fake.sent.clear()
+    await bot.action_start_episode(text_update(fake, "/log"), make_context(fake, {}))
+    check(any(t(LANG, "too_many_open", n=2) in m for m in fake.sent),
+          "лимит незакрытых эпизодов объяснён")
+    # и «вернуть в работу» тоже не обходит лимит
+    closed_one = db.close_episode(uid, openers[0].id)
+    fake.answers.clear()
+    await press(f"ro:{openers[1].id}")   # уже открыт — отсечётся раньше
+    db.close_episode(uid, openers[1].id)
+    for o in openers:
+        db.delete_episode(uid, o.id)
+    cfg.MAX_OPEN_EPISODES = saved_open
+
+    # 19h. /forget — полное удаление своих данных.
+    db.start_episode(uid)
+    db.add_med(uid, "конкор")
+    db.set_lang(uid, LANG)
+    fake.sent.clear(); fake.markups.clear()
+    await bot.cmd_forget(text_update(fake, "/forget"), make_context(fake, ud))
+    check(any("Удалить все мои записи" in m for m in fake.sent),
+          "/forget спрашивает подтверждение, а не удаляет сразу")
+    confirm_btns = [b for m in fake.markups if m
+                    for row in getattr(m, "inline_keyboard", []) for b in row]
+    check(any(b.callback_data == "fy" for b in confirm_btns), "есть кнопка подтверждения")
+    other = 200
+    db.start_episode(other)   # чужие данные не должны пострадать
+    await press("fy")
+    check(db.count_episodes(uid) == 0, "все эпизоды удалены")
+    check(db.all_meds(uid) == [], "лекарства удалены")
+    check(db.get_lang(uid) is None, "выбранный язык тоже удалён")
+    check(db.count_episodes(other) == 1, "данные другого пользователя не тронуты")
+    check(not [n for n in JQ.store if f":{uid}:" in n],
+          f"задачи пользователя сняты ({[n for n in JQ.store if f':{uid}:' in n]})")
+    fake.sent.clear()
+    await bot.cmd_forget(text_update(fake, "/forget"), make_context(fake, {}))
+    check(any(t(LANG, "forget_empty") in m for m in fake.sent),
+          "на пустом дневнике /forget говорит, что удалять нечего")
+
     # 20. Удаление с подтверждением.
+    # После /forget дневник пуст — создаём, что удалять
+    if db.last_episode(uid) is None:
+        db.close_episode(uid, db.start_episode(uid).id)
     last_id = db.last_episode(uid).id
     await press(f"d:{last_id}")
     check(any("Удалить эпизод" in t for t in fake.edited), "спросил подтверждение удаления")

@@ -105,7 +105,7 @@ def main() -> int:
         )
         check(approx.end_approx and approx.duration() == timedelta(minutes=45),
               "примерная длительность записана и помечена")
-        check(db.all_open_episodes() == [] or all(e.id != approx.id for e in db.all_open_episodes()),
+        check(db.all_open_episodes(60) == [] or all(e.id != approx.id for e in db.all_open_episodes(60)),
               "закрытый эпизод уходит из списка открытых")
         check("~" in report.duration_label(approx, LANG), "примерная длительность показана с «~»")
         check("примерной длительностью" in report.period_report(30, [approx], [], LANG),

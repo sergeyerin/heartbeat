@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     lat        REAL,                       -- где это было, если отметили
     lon        REAL,
     card_msg   INTEGER,                    -- id сообщения с живой карточкой
+    remind_stage INTEGER NOT NULL DEFAULT 0, -- 0 = не спрашивали, 1 = уже спросили
     confirmed_at TEXT,                    -- когда последний раз сказали «ещё идёт»
     severity   INTEGER,                   -- 1 терпимо / 2 средне / 3 тяжело
     pulse      INTEGER,
@@ -94,6 +95,7 @@ class Episode:
     lat: float | None = None
     lon: float | None = None
     card_msg: int | None = None
+    remind_stage: int = 0
     confirmed_at: datetime | None = None
 
     @property
@@ -173,6 +175,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE episodes ADD COLUMN lon REAL")
     if "card_msg" not in columns:
         conn.execute("ALTER TABLE episodes ADD COLUMN card_msg INTEGER")
+    if "remind_stage" not in columns:
+        conn.execute(
+            "ALTER TABLE episodes ADD COLUMN remind_stage INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _db() -> sqlite3.Connection:
@@ -197,6 +203,7 @@ def _row_to_episode(row: sqlite3.Row) -> Episode:
         lat=row["lat"],
         lon=row["lon"],
         card_msg=row["card_msg"],
+        remind_stage=row["remind_stage"],
         confirmed_at=_parse(row["confirmed_at"]),
     )
 
@@ -285,13 +292,22 @@ def mark_end_unknown(user_id: int, episode_id: int) -> Episode | None:
     return get_episode(user_id, episode_id)
 
 
-def all_open_episodes() -> list[Episode]:
-    """Все открытые эпизоды всех пользователей — для восстановления напоминаний
-    после рестарта контейнера (job queue живёт в памяти процесса)."""
+def all_open_episodes(stale_after_min: int, limit: int = 500) -> list[Episode]:
+    """Открытые и ещё не забытые эпизоды всех пользователей.
+
+    Для восстановления напоминаний после рестарта (job queue живёт в памяти).
+    Фильтр и лимит — в SQL: раньше выбирались ВСЕ открытые эпизоды всех
+    пользователей, и один человек с тысячами брошенных эпизодов тормозил старт
+    всем остальным, а при 256 МБ в контейнере мог и не дать боту запуститься.
+    """
+    cutoff = _iso(utcnow() - timedelta(minutes=stale_after_min))
     return [
         _row_to_episode(r)
         for r in _db().execute(
-            "SELECT * FROM episodes WHERE ended_at IS NULL ORDER BY started_at ASC"
+            "SELECT * FROM episodes WHERE ended_at IS NULL AND end_unknown = 0 "
+            "AND COALESCE(confirmed_at, started_at) > ? "
+            "ORDER BY started_at ASC LIMIT ?",
+            (cutoff, limit),
         ).fetchall()
     ]
 
@@ -351,7 +367,8 @@ def reopen_episode(user_id: int, episode_id: int) -> Episode | None:
     """Возвращает ЗАКРЫТЫЙ эпизод в работу. None, если он и так открыт."""
     cur = _db().execute(
         "UPDATE episodes SET ended_at = NULL, end_approx = 0, end_unknown = 0, "
-        "confirmed_at = ? WHERE id = ? AND user_id = ? AND ended_at IS NOT NULL",
+        "remind_stage = 0, confirmed_at = ? "
+        "WHERE id = ? AND user_id = ? AND ended_at IS NOT NULL",
         (_iso(utcnow()), episode_id, user_id),
     )
     _db().commit()
@@ -459,6 +476,15 @@ def append_note_dropping_oldest(
     return get_episode(user_id, episode_id), dropped
 
 
+def set_remind_stage(user_id: int, episode_id: int, stage: int) -> None:
+    """0 — вопрос «отпустило?» ещё не задан, 1 — задан и ждём ответа."""
+    _db().execute(
+        "UPDATE episodes SET remind_stage = ? WHERE id = ? AND user_id = ?",
+        (stage, episode_id, user_id),
+    )
+    _db().commit()
+
+
 def set_card_msg(user_id: int, episode_id: int, message_id: int | None) -> None:
     """Запоминает сообщение с карточкой, чтобы править его, а не слать новое."""
     _db().execute(
@@ -538,6 +564,30 @@ def all_episodes(user_id: int) -> list[Episode]:
             (user_id,),
         ).fetchall()
     ]
+
+
+def count_open_episodes(user_id: int) -> int:
+    return _db().execute(
+        "SELECT COUNT(*) FROM episodes WHERE user_id = ? AND ended_at IS NULL",
+        (user_id,),
+    ).fetchone()[0]
+
+
+def purge_user(user_id: int) -> dict[str, int]:
+    """Удаляет ВСЁ про пользователя. Возвращает, сколько чего удалено.
+
+    Право на удаление своих данных — не фича, а обязанность; для данных о
+    здоровье тем более. Чистится всё, включая координаты (они уходят вместе со
+    строками эпизодов) и выбранный язык.
+    """
+    counts = {
+        "episodes": count_episodes(user_id),
+        "meds": len(all_meds(user_id)),
+    }
+    for table in ("episodes", "meds", "user_prefs"):
+        _db().execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+    _db().commit()
+    return counts
 
 
 def count_episodes(user_id: int) -> int:

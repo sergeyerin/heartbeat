@@ -415,6 +415,38 @@ def _is_private(update: Update) -> bool:
     )
 
 
+def _throttled(context: ContextTypes.DEFAULT_TYPE, key: str, seconds: float) -> bool:
+    """Простой предохранитель на пользователя: не чаще раза в N секунд.
+
+    Бот публичный и однопроцессный: сценарий «тысяча нажатий в минуту» измерен
+    и упирается не в этого человека, а в отзывчивость для всех остальных.
+    """
+    now = db.utcnow().timestamp()
+    last = context.user_data.get(f"rl:{key}")
+    if last is not None and now - last < seconds:
+        return True
+    context.user_data[f"rl:{key}"] = now
+    return False
+
+
+async def _can_add_episode(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                           user_id: int, lang: str) -> bool:
+    """Можно ли создать ещё один эпизод. Объясняет отказ, а не молчит."""
+    if db.count_episodes(user_id) >= config.MAX_EPISODES_PER_USER:
+        await context.bot.send_message(
+            update.effective_chat.id,
+            t(lang, "too_many_episodes", n=config.MAX_EPISODES_PER_USER),
+        )
+        return False
+    if db.count_open_episodes(user_id) >= config.MAX_OPEN_EPISODES:
+        await context.bot.send_message(
+            update.effective_chat.id,
+            t(lang, "too_many_open", n=config.MAX_OPEN_EPISODES),
+        )
+        return False
+    return True
+
+
 def _active(user_id: int) -> db.Episode | None:
     """Эпизод, который идёт прямо сейчас (забытые не считаются)."""
     return db.active_episode(user_id, config.STALE_AFTER_MIN)
@@ -613,7 +645,10 @@ async def _remind(context: ContextTypes.DEFAULT_TYPE) -> None:
     if ep is None or not ep.is_open:
         return
     lang = _job_lang(user_id)
-    final = bool(job.data.get("final"))
+    # Этап берём из БД, а не из данных задачи: задачи живут в памяти, и после
+    # рестарта контейнера бот спрашивал «отпустило?» заново — а при краш-луме
+    # примерно раз в минуту.
+    final = bool(job.data.get("final")) or ep.remind_stage >= 1
     stale = ep.is_stale(config.STALE_AFTER_MIN)
     if final and not stale:
         # STALE_AFTER_MIN задан вручную больше окна: ещё рано называть эпизод
@@ -641,6 +676,7 @@ async def _remind(context: ContextTypes.DEFAULT_TYPE) -> None:
           minutes=config.EPISODE_WINDOW_MIN),
         reply_markup=remind_keyboard(ep, lang),
     )
+    db.set_remind_stage(user_id, ep.id, 1)
     _schedule_reminder(
         context.job_queue, user_id, ep.id, config.EPISODE_WINDOW_MIN, final=True
     )
@@ -692,6 +728,24 @@ async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Удаление всех своих данных. В два шага: это необратимо."""
+    user_id = _uid(update)
+    lang = _lang(update)
+    episodes = db.count_episodes(user_id)
+    meds = len(db.all_meds(user_id))
+    if not episodes and not meds:
+        await update.message.reply_text(t(lang, "forget_empty"))
+        return
+    await update.message.reply_text(
+        t(lang, "forget_confirm", episodes=episodes, meds=meds),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(t(lang, "btn_forget_yes"), callback_data="fy")],
+            [InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="nx")],
+        ]),
+    )
+
+
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lang = _lang(update)
     pending = context.user_data.pop("await", None)
@@ -704,6 +758,9 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def action_start_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = _uid(update)
     lang = _lang(update)
+    if _throttled(context, "episode", config.MIN_ACTION_INTERVAL_SEC):
+        await update.message.reply_text(t(lang, "too_fast"))
+        return
     context.user_data.pop("await", None)
     existing = _active(user_id)
     if existing:
@@ -716,6 +773,8 @@ async def action_start_episode(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     # Время — из сообщения, а не из момента обработки: нажатие, доставленное с
     # задержкой (или накопившееся за время простоя бота), сохранит своё время.
+    if not await _can_add_episode(update, context, user_id, lang):
+        return
     ep = db.start_episode(user_id, started_at=update.message.date)
     await update.message.reply_text(
         t(lang, "ep_logged", id=ep.id, time=report.hhmm(ep.started_at)),
@@ -723,7 +782,9 @@ async def action_start_episode(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     await _send_card(update, context, ep, lang)
     _schedule_reminder(context.job_queue, user_id, ep.id, config.EPISODE_WINDOW_MIN)
-    await _mention_forgotten(update.effective_chat.id, user_id, context, lang, skip_id=ep.id)
+    # Напоминание о старых незакрытых эпизодах здесь НЕ показываем: человеку
+    # сейчас плохо, а разбор бэклога — не то, чем его стоит занимать. Оно
+    # появится в «Сегодня» и в отчёте, то есть когда он сам пришёл смотреть.
 
 
 async def action_end_episode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -760,6 +821,9 @@ async def action_end_episode(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def action_med(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = _uid(update)
     lang = _lang(update)
+    if _throttled(context, "med", config.MIN_ACTION_INTERVAL_SEC):
+        await update.message.reply_text(t(lang, "too_fast"))
+        return
     med = db.add_med(user_id, taken_at=update.message.date)
     recent = db.recent_med_names(user_id)
     rows = [
@@ -780,8 +844,12 @@ async def action_med(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def action_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _send_day(update.effective_chat.id, _uid(update), context, report.today_local(),
-                    _lang(update))
+    lang = _lang(update)
+    await _send_day(update.effective_chat.id, _uid(update), context,
+                    report.today_local(), lang)
+    # Спокойный момент: человек сам пришёл смотреть записи — самое время
+    # напомнить про эпизод без отметки окончания.
+    await _mention_forgotten(update.effective_chat.id, _uid(update), context, lang)
 
 
 async def cmd_yesterday(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -805,6 +873,7 @@ async def action_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         context, update.effective_chat.id, _report_text(_uid(update), 7, lang),
         _report_keyboard(7, lang),
     )
+    await _mention_forgotten(update.effective_chat.id, _uid(update), context, lang)
 
 
 async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -827,7 +896,13 @@ def _report_text(user_id: int, days: int, lang: str) -> str:
 
 
 async def action_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _send_csv(update.effective_chat.id, _uid(update), context, _lang(update))
+    lang = _lang(update)
+    # Выгрузка собирает весь дневник в памяти и блокирует цикл событий —
+    # единственное место, где один человек заметно мешает остальным.
+    if _throttled(context, "export", config.EXPORT_COOLDOWN_SEC):
+        await update.message.reply_text(t(lang, "export_cooldown"))
+        return
+    await _send_csv(update.effective_chat.id, _uid(update), context, lang)
 
 
 async def _send_csv(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE,
@@ -1020,6 +1095,24 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             reply_markup=main_keyboard(_active(user_id) is not None, chosen),
         )
         return
+    if action == "fy":  # подтверждённое удаление всех своих данных
+        # Снимаем все задачи этого пользователя: иначе напоминания и обновления
+        # карточек продолжат ходить по удалённым эпизодам.
+        if context.job_queue is not None:
+            for job in list(context.job_queue.jobs()):
+                if job.name and job.name.endswith(f":{user_id}") or (
+                    job.name and f":{user_id}:" in job.name
+                ):
+                    job.schedule_removal()
+        counts = db.purge_user(user_id)
+        context.user_data.clear()
+        await ack(t(lang, "ack_deleted"))
+        await query.edit_message_text(t(lang, "forget_done", **counts))
+        await context.bot.send_message(
+            query.message.chat_id, t(lang, "done"),
+            reply_markup=main_keyboard(False, lang),
+        )
+        return
     if action == "r":
         await ack()
         days = _arg(parts, 1, REPORT_PERIODS)
@@ -1079,6 +1172,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             await _send_card(update, context, ep, lang)
             return
+        if not await _can_add_episode(update, context, user_id, lang):
+            return
         ep = db.start_episode(user_id)
         status = db.NOTE_OK
         if note:
@@ -1110,6 +1205,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ep = db.set_pulse(user_id, existing.id, pulse)
             await query.edit_message_text(t(lang, "pulse_to_ep", pulse=pulse, id=ep.id))
             await _send_card(update, context, ep, lang)
+            return
+        if not await _can_add_episode(update, context, user_id, lang):
             return
         ep = db.start_episode(user_id)
         ep = db.set_pulse(user_id, ep.id, pulse)
@@ -1334,6 +1431,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
     if action == "ro":
+        if db.count_open_episodes(user_id) >= config.MAX_OPEN_EPISODES:
+            await ack(t(lang, "too_many_open", n=config.MAX_OPEN_EPISODES))
+            return
         reopened = db.reopen_episode(user_id, episode_id)
         if reopened is None:
             await ack(t(lang, "ep_state_changed"))
@@ -1359,6 +1459,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await _refresh(query, db.get_episode(user_id, episode_id), lang)
             return
         ep = confirmed
+        # Человек ответил — цикл вопросов начинается заново.
+        db.set_remind_stage(user_id, episode_id, 0)
         _schedule_reminder(context.job_queue, user_id, episode_id, config.EPISODE_WINDOW_MIN)
         await ack(t(lang, "ack_extended", minutes=config.EPISODE_WINDOW_MIN))
         try:
@@ -1501,6 +1603,7 @@ def _commands(lang: str) -> list[BotCommand]:
         BotCommand("month", t(lang, "cmd_month")),
         BotCommand("export", t(lang, "cmd_export")),
         BotCommand("lang", t(lang, "cmd_lang")),
+        BotCommand("forget", t(lang, "cmd_forget")),
         BotCommand("cancel", t(lang, "cmd_cancel")),
         BotCommand("help", t(lang, "cmd_help")),
     ]
@@ -1514,13 +1617,12 @@ async def post_init(app) -> None:
                     "Поставьте python-telegram-bot[job-queue].")
     else:
         restored = 0
-        for ep in db.all_open_episodes():
-            if ep.is_stale(config.STALE_AFTER_MIN):
-                continue  # забытым эпизодам напоминания уже не помогут
+        for ep in db.all_open_episodes(config.STALE_AFTER_MIN):
             anchor = ep.confirmed_at or ep.started_at
             due = anchor + timedelta(minutes=config.EPISODE_WINDOW_MIN)
             left = (due - db.utcnow()).total_seconds() / 60
-            _schedule_reminder(app.job_queue, ep.user_id, ep.id, max(1, int(left)))
+            _schedule_reminder(app.job_queue, ep.user_id, ep.id, max(1, int(left)),
+                               final=ep.remind_stage >= 1)
             if ep.card_msg:
                 # chat_id == user_id: диалог приватный (см. register_handlers)
                 _schedule_tick(app.job_queue, ep.user_id, ep.id, ep.user_id)
@@ -1549,7 +1651,8 @@ def register_handlers(app) -> None:
     """
     for name, handler in (
         ("start", cmd_start), ("help", cmd_help), ("lang", cmd_lang),
-        ("cancel", cmd_cancel), ("log", action_start_episode),
+        ("cancel", cmd_cancel), ("forget", cmd_forget),
+        ("log", action_start_episode),
         ("stop", action_end_episode), ("med", action_med), ("last", cmd_last),
         ("today", action_today), ("yesterday", cmd_yesterday),
         ("week", cmd_week), ("month", cmd_month), ("export", action_export),

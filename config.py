@@ -30,6 +30,13 @@ RECENT_EPISODE_MIN = int(os.getenv("RECENT_EPISODE_MIN", "180"))
 # Чаще минуты незачем: секунды в дневнике не нужны, а каждая правка — вызов API.
 CARD_TICK_SEC = int(os.getenv("CARD_TICK_SEC", "60"))
 
+# Предохранители для публичного бота: один человек не должен ни исчерпать
+# диск, ни затормозить остальных в однопроцессном боте.
+MAX_EPISODES_PER_USER = int(os.getenv("MAX_EPISODES_PER_USER", "5000"))
+MAX_OPEN_EPISODES = int(os.getenv("MAX_OPEN_EPISODES", "10"))
+MIN_ACTION_INTERVAL_SEC = float(os.getenv("MIN_ACTION_INTERVAL_SEC", "1.5"))
+EXPORT_COOLDOWN_SEC = int(os.getenv("EXPORT_COOLDOWN_SEC", "60"))
+
 # Окно эпизода. Через столько минут после начала бот спрашивает «отпустило?»,
 # и на столько же «⏳ Ещё идёт» продлевает эпизод. 0 = не спрашивать.
 EPISODE_WINDOW_MIN = int(os.getenv("EPISODE_WINDOW_MIN", "30"))
