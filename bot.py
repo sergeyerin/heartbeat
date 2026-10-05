@@ -83,7 +83,7 @@ DURATION_CHOICES = (15, 30, 60, 120, 240, 480)
 # ровную десятичасовую длительность как точную.
 NEEDS_ACTIVE = frozenset({"e", "sh"})
 NEEDS_OPEN = frozenset({"ap", "apm", "go", "unk"})
-NEEDS_CLOSED = frozenset({"ro", "se"})
+NEEDS_CLOSED = frozenset({"ro", "se", "sc"})
 
 MENU_ACTIONS = ("btn_start", "btn_end", "btn_med", "btn_today", "btn_report", "btn_export")
 # Текст кнопки приходит обратно от Telegram, поэтому разбираем его по всем
@@ -240,23 +240,15 @@ def card_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
                                           callback_data=f"dp:{ep.id}")])
     elif ep.is_open:
         rows.append([InlineKeyboardButton(t(lang, "btn_end"), callback_data=f"e:{ep.id}")])
-    elif _can_reopen(ep):
-        # «Ещё идёт» — отмена случайного нажатия, а не функция: она стирает
-        # время окончания без возврата. На старом эпизоде это портит данные
-        # (нажатие делает его идущим, и следующее запишет неделю длительности),
-        # поэтому кнопку показываем только пока ошибка правдоподобна.
-        rows.append([InlineKeyboardButton(t(lang, "btn_reopen"), callback_data=f"ro:{ep.id}")])
-
-    if _can_shift_end(ep):
-        # Первым рядом, прямо под строкой «✅ Эпизод #5 — 12 мин», которую он и
-        # исправляет. Прятать в панель нельзя: про эту правку надо вспомнить за
-        # минуты, а кнопка в двух нажатиях вглубь под подписью без слова
-        # «время» не будет найдена никем.
-        rows.insert(0, [
-            InlineKeyboardButton(t(lang, "btn_shift_end", minutes=m),
-                                 callback_data=f"se:{ep.id}:-{m}")
-            for m in END_SHIFT_CHOICES
-        ])
+    elif _can_shift_end(ep):
+        # Один самоназывающийся вопрос вместо ряда «✅ −15/−30/−60» и
+        # «↩️ Ещё не отпустило» по отдельности: владелец увидел на карточке
+        # «кучу зелёных галок» — ✅ сдвигов сталкивался с ✅ выбранной тяжести,
+        # а «не отпустило» посередине спорило с ними. Это ОДИН вопрос («когда
+        # на самом деле отпустило?») с разными ответами, и живёт он за одной
+        # кнопкой, которая называет себя сама — обнаружимость не страдает.
+        rows.append([InlineKeyboardButton(t(lang, "btn_end_when"),
+                                          callback_data=f"sc:{ep.id}")])
 
     rows.append([
         InlineKeyboardButton(t(lang, "btn_refine"), callback_data=f"rf:{ep.id}"),
@@ -297,6 +289,26 @@ def refine_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(t(lang, "btn_place_clear"),
                                           callback_data=f"pc:{ep.id}")])
     return InlineKeyboardMarkup(rows)
+
+
+def end_when_panel(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
+    """«Когда на самом деле отпустило?» — все ответы в одном месте.
+
+    «Раньше на N» и «ещё не отпустило» — ответы на один и тот же вопрос,
+    поэтому они соседи, а не разбросаны по карточке. Без значка ✅: он
+    зарезервирован за «отпустило сейчас» и за отметкой выбранного.
+    """
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t(lang, "btn_card"), callback_data=f"c:{ep.id}")],
+        [
+            InlineKeyboardButton(
+                t(lang, "btn_minus",
+                  dur=report.human_duration(timedelta(minutes=m), lang)),
+                callback_data=f"se:{ep.id}:-{m}")
+            for m in END_SHIFT_CHOICES
+        ],
+        [InlineKeyboardButton(t(lang, "btn_reopen"), callback_data=f"ro:{ep.id}")],
+    ])
 
 
 def duration_panel(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
@@ -929,23 +941,43 @@ async def _remind(context: ContextTypes.DEFAULT_TYPE) -> None:
         due = anchor + timedelta(minutes=config.STALE_AFTER_MIN)
         _schedule_reminder(context.job_queue, user_id, ep.id, _until(due), final=True)
         return
+    # Напоминание ЗАМЕНЯЕТ карточку, а не добавляет вторую: раньше в чате
+    # оказывались два сообщения с кнопкой «✅ Отпустило» — живая карточка и
+    # вопрос, — и человек резонно спрашивал, почему их два. Старая карточка
+    # удаляется, вопрос приклеивается к тексту карточки и сам становится ею:
+    # одна интерактивная поверхность на эпизод в любой момент.
+    if ep.card_msg:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=ep.card_msg)
+        except Exception:
+            try:
+                await context.bot.edit_message_reply_markup(
+                    chat_id=chat_id, message_id=ep.card_msg, reply_markup=None)
+            except Exception:
+                pass
+    if context.user_data is not None:
+        context.user_data.pop(f"panel:{ep.id}", None)
     if final or stale:
         # Вопрос был задан и остался без ответа: эпизод закрывать нечем, время
         # окончания выдумывать нельзя. Фиксируем как есть и предлагаем указать
         # длительность по памяти. Больше не напоминаем.
-        await context.bot.send_message(
+        sent = await context.bot.send_message(
             chat_id,
-            t(lang, "remind_stale", id=ep.id, time=report.hhmm(ep.started_at),
-              day=report._day_prefix(ep.started_at, lang)),
+            report.episode_card(ep, lang) + "\n\n" + t(lang, "remind_stale_tail"),
             reply_markup=InlineKeyboardMarkup(duration_rows(ep, lang)),
         )
+        db.set_card_msg(user_id, ep.id, sent.message_id)
         return
-    await context.bot.send_message(
+    sent = await context.bot.send_message(
         chat_id,
-        t(lang, "remind_ask", id=ep.id, dur=report.human_duration(ep.duration(), lang),
-          minutes=config.EPISODE_WINDOW_MIN),
+        report.episode_card(ep, lang) + "\n\n"
+        + t(lang, "remind_ask", minutes=config.EPISODE_WINDOW_MIN),
         reply_markup=remind_keyboard(ep, lang),
     )
+    # Тик продолжает идти по этому же сообщению: через минуту он перерисует
+    # его в обычную карточку — вопрос уже доставлен уведомлением, а «не
+    # отвечать» и есть один из ответов (контрольный заход учтёт молчание).
+    db.set_card_msg(user_id, ep.id, sent.message_id)
     db.set_remind_stage(user_id, ep.id, 1)
     _schedule_reminder(context.job_queue, user_id, ep.id, _window(), final=True)
 
@@ -1872,6 +1904,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception as exc:
             if "not modified" not in str(exc):
                 log.warning("Панель уточнений не открылась: %s", exc)
+        return
+    if action == "sc":  # закрытый эпизод: «когда на самом деле отпустило?»
+        await ack()
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=end_when_panel(ep, lang))
+        except Exception as exc:
+            if "not modified" not in str(exc):
+                log.warning("Панель окончания не открылась: %s", exc)
         return
     if action == "dp":  # панель длительности у забытого эпизода
         context.user_data[f"panel:{episode_id}"] = "duration"

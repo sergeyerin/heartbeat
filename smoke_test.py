@@ -151,13 +151,16 @@ def main() -> int:
 
         # Карточка во всех состояниях укладывается в четыре ряда: она живая,
         # человек к ней возвращается, и текст с кнопками должны влезать вместе
-        # Четыре ряда везде. Исключение одно и намеренное: у НЕДАВНО закрытого
-        # эпизода сверху добавляется ряд правки окончания — он обязан быть на
-        # виду, иначе про него не вспомнят (см. CLAUDE.md).
-        for state_ep, limit, name in ((hung, 4, "забытый"), (ep, 5, "закрытый")):
+        # Четыре ряда ВЕЗДЕ, без исключений: ряд «✅ −N» у закрытого эпизода
+        # владелец на живом использовании назвал «кучей зелёных галок», и
+        # правка конца уехала за кнопку-вопрос. Форма снова едина.
+        for state_ep, name in ((hung, "забытый"), (ep, "закрытый")):
             rows = bot.card_keyboard(state_ep, LANG).inline_keyboard
-            check(len(rows) <= limit,
-                  f"карточка ({name}) не больше {limit} рядов: {len(rows)}")
+            check(len(rows) <= 4,
+                  f"карточка ({name}) не больше четырёх рядов: {len(rows)}")
+            labels = [btn.text for r in rows for btn in r]
+            check(sum(1 for x in labels if x.startswith("✅")) <= 1,
+                  f"не больше одной галки на карточке ({name}): {labels}")
         fresh_rows = bot.card_keyboard(db.open_episode(fuid) or hung, LANG).inline_keyboard
         check(len(fresh_rows) == 4, f"у идущего эпизода ровно четыре ряда: {len(fresh_rows)}")
         db.delete_episode(fuid, hung.id)
@@ -293,6 +296,7 @@ def main() -> int:
                 bot._report_keyboard(7, code),
                 bot._toggle_keyboard(stale_sample, "sym", code),
                 bot._lang_keyboard(),
+                bot.end_when_panel(ep, code),
                 InlineKeyboardMarkup(bot.duration_rows(stale_sample, code)),
             ]
             for board in boards:

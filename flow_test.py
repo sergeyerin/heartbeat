@@ -177,7 +177,8 @@ class FakeJobQueue:
         """Выполняет напоминание так, как это сделал бы планировщик."""
         spec = self.store.pop(name)
         job = SimpleNamespace(data=spec["data"], user_id=spec["user_id"], chat_id=spec["chat_id"])
-        await bot._remind(SimpleNamespace(bot=fake, job=job, job_queue=self))
+        await bot._remind(SimpleNamespace(bot=fake, job=job, job_queue=self,
+                                          user_data=self.user_data))
 
     async def tick(self, name, fake):
         """Выполняет обновление живой карточки; задача остаётся запланированной."""
@@ -333,8 +334,18 @@ async def run() -> None:
           "опоздавшее напоминание не выбрасывается планировщиком")
 
     # Сработало напоминание, эпизод ещё идёт.
+    card_before_q = db.get_episode(uid, ep.id).card_msg
+    fake.deleted.clear()
     await JQ.fire(job, fake)
     check(any("Отпустило?" in t for t in fake.sent), "бот сам спросил, отпустило ли")
+    # Жалоба владельца: было два сообщения с «✅ Отпустило» — карточка и вопрос.
+    check(card_before_q in fake.deleted,
+          "вопрос ЗАМЕНИЛ карточку: старая удалена, поверхность одна")
+    card_after_q = db.get_episode(uid, ep.id).card_msg
+    check(card_after_q is not None and card_after_q != card_before_q,
+          "и вопрос сам стал карточкой эпизода")
+    check(any("идёт" in m and "Отпустило?" in m for m in fake.sent),
+          "текст карточки и вопрос — в одном сообщении")
     check(job in JQ.store and JQ.store[job]["data"]["final"] is True,
           "после вопроса запланирован один контрольный заход, а не повтор")
     check(JQ.store[job]["when"] == timedelta(minutes=cfg.EPISODE_WINDOW_MIN),
@@ -361,8 +372,8 @@ async def run() -> None:
     db._db().commit()
     fake.sent.clear()
     await JQ.fire(job, fake)
-    check(any("без отметки окончания" in t for t in fake.sent),
-          "по забытому эпизоду бот прислал вопрос о длительности")
+    check(any("окончание не отмечено" in m for m in fake.sent),
+          "по забытому эпизоду бот прислал карточку с вопросом о длительности")
     check(job not in JQ.store, "забытый эпизод больше не дёргает напоминаниями")
     check(db.active_episode(uid, cfg.STALE_AFTER_MIN) is None,
           "забытый эпизод перестал считаться текущим")
@@ -1022,8 +1033,19 @@ async def run() -> None:
     for needed, why in ((f"m:{fresh_closed.id}:sym", "симптомы"),
                         (f"m:{fresh_closed.id}:trg", "причины")):
         check(needed in panel_btns, f"а {why} — в панели, в одном нажатии")
-    check(f"ro:{fresh_closed.id}" in fresh_btns,
-          "только что закрытый можно вернуть в работу — это отмена опечатки")
+    check(f"sc:{fresh_closed.id}" in fresh_btns,
+          "у только что закрытого — кнопка-вопрос «когда отпустило»")
+    when_btns = [b.callback_data for row in
+                 bot.end_when_panel(fresh_closed, LANG).inline_keyboard for b in row]
+    check(f"ro:{fresh_closed.id}" in when_btns,
+          "«ещё не отпустило» — внутри неё: это ответ на тот же вопрос")
+    check(f"se:{fresh_closed.id}:-30" in when_btns, "и сдвиги конца там же")
+    # Регресс жалобы владельца: на карточке нет «кучи зелёных галок» — ✅
+    # остаётся только у выбранной тяжести.
+    texts_fresh = [b.text for row in
+                   bot.card_keyboard(fresh_closed, LANG).inline_keyboard for b in row]
+    check(not any(x.startswith("✅ −") for x in texts_fresh),
+          "на закрытой карточке нет кнопок «✅ −N мин»")
 
     old_closed = db.start_episode(uid)
     db.close_episode(uid, old_closed.id)
@@ -1096,8 +1118,15 @@ async def run() -> None:
     db.close_episode(uid, late_ep.id)
     late_ep = db.get_episode(uid, late_ep.id)
     rows = bot.card_keyboard(late_ep, LANG).inline_keyboard
-    check(rows[0][0].callback_data == f"se:{late_ep.id}:-15",
-          "правка окончания — первым рядом, под строкой с длительностью")
+    flat_late = [b.callback_data for r in rows for b in r]
+    check(f"sc:{late_ep.id}" in flat_late,
+          "правка окончания доступна с карточки кнопкой-вопросом")
+    check(len(rows) <= 4, f"и карточка снова в четыре ряда ({len(rows)})")
+    fake.markups.clear()
+    await press(f"sc:{late_ep.id}")
+    sc_btns = [b.callback_data for m in fake.markups if m
+               for row in getattr(m, "inline_keyboard", []) for b in row]
+    check(f"se:{late_ep.id}:-30" in sc_btns, "в панели — сдвиги конца")
     panel_data = [b.callback_data for row in
                   bot.refine_keyboard(late_ep, LANG).inline_keyboard for b in row]
     check(not any((c or "").startswith("se:") for c in panel_data),
