@@ -15,7 +15,14 @@ from types import SimpleNamespace
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "flow")
 os.environ.setdefault("TZ", "Europe/Moscow")
 
-from telegram import CallbackQuery, Chat, Message, Update, User  # noqa: E402
+from telegram import (  # noqa: E402
+    CallbackQuery,
+    Chat,
+    Message,
+    MessageEntity,
+    Update,
+    User,
+)
 
 import bot  # noqa: E402
 import report  # noqa: E402
@@ -44,6 +51,8 @@ class FakeBot:
         # PTB спрашивает defaults у бота при reply_text — без атрибута сработает
         # __getattr__ и вернёт функцию вместо None.
         self.defaults = None
+        # CommandHandler сверяет адресацию «/cmd@bot» с именем бота
+        self.username = "heartbeat_test_bot"
         self.sent: list[str] = []
         self.edited: list[str] = []
         self.documents: list[str] = []
@@ -84,31 +93,18 @@ class FakeBot:
 
 
 def build_handlers():
-    """Хендлеры так, как их регистрирует build_app, но без сетевого клиента."""
-    import telegram.ext as tg_ext
+    """Тот же набор хендлеров, что и в боте: вызываем настоящую регистрацию.
+
+    Раньше тест повторял список из build_app своей копией — и не замечал бы,
+    например, пропавшего фильтра у команд.
+    """
     collected = []
 
-    class _Collector:
+    class Collector:
         def add_handler(self, handler, group=0):
             collected.append(handler)
 
-    original = bot.ApplicationBuilder
-    bot.build_app.__globals__["ApplicationBuilder"] = original
-    app = _Collector()
-    # Повторяем регистрацию из build_app: сам build_app требует токен и сеть.
-    for name, handler in (
-        ("start", bot.cmd_start), ("help", bot.cmd_help), ("lang", bot.cmd_lang),
-        ("cancel", bot.cmd_cancel), ("log", bot.action_start_episode),
-        ("stop", bot.action_end_episode), ("med", bot.action_med),
-        ("last", bot.cmd_last), ("today", bot.action_today),
-        ("yesterday", bot.cmd_yesterday), ("week", bot.cmd_week),
-        ("month", bot.cmd_month), ("export", bot.action_export),
-    ):
-        app.add_handler(tg_ext.CommandHandler(name, handler, filters=bot.PRIVATE))
-    app.add_handler(tg_ext.MessageHandler(
-        tg_ext.filters.Text(list(bot.ACTION_BY_TEXT)) & bot.PRIVATE, bot.on_menu_button))
-    app.add_handler(tg_ext.MessageHandler(
-        tg_ext.filters.TEXT & ~tg_ext.filters.COMMAND & bot.PRIVATE, bot.on_text))
+    bot.register_handlers(Collector())
     return collected
 
 
@@ -422,19 +418,51 @@ async def run() -> None:
 
     # 16. M1: бот не работает в группах.
     group = Chat(id=-1001234567890, type="supergroup")
-    gmsg = Message(message_id=9, date=datetime.now(timezone.utc), chat=group,
-                   from_user=USER, text=t(LANG, "btn_start"), entities=[])
-    gmsg.set_bot(fake)
-    gupd = Update(update_id=9, message=gmsg)
+    handlers = build_handlers()
+
+    def in_group(text: str, command: bool = False):
+        ents = []
+        if command:
+            ents = [MessageEntity(type=MessageEntity.BOT_COMMAND, offset=0,
+                                  length=len(text.split()[0]))]
+        msg = Message(message_id=9, date=datetime.now(timezone.utc), chat=group,
+                      from_user=USER, text=text, entities=ents)
+        msg.set_bot(fake)
+        upd = Update(update_id=9, message=msg)
+        return upd, [h for h in handlers if h.check_update(upd) not in (False, None)]
+
+    gupd, taken = in_group(t(LANG, "btn_start"))
     check(not bot._is_private(gupd), "сообщение из группы не считается приватным")
-    private_handlers = [
-        h for h in build_handlers()
-        if h.check_update(gupd) not in (False, None)
-    ]
-    check(not private_handlers, f"ни один хендлер не берёт группу ({private_handlers})")
+    check(not taken, f"кнопку из группы не берёт никто ({taken})")
+    # Команды в группе — главный вектор: /export в чужом чате выгрузил бы дневник.
+    # Entity обязателен, иначе CommandHandler не сработал бы и без фильтра,
+    # и проверка была бы бессмысленной.
+    for cmd in ("/export", "/today", "/week", "/log"):
+        _, taken_cmd = in_group(cmd, command=True)
+        check(not taken_cmd, f"команду {cmd} из группы не берёт никто ({taken_cmd})")
+    # А в приватном чате те же команды обрабатываются
+    priv = Message(message_id=10, date=datetime.now(timezone.utc), chat=CHAT,
+                   from_user=USER, text="/export",
+                   entities=[MessageEntity(type=MessageEntity.BOT_COMMAND,
+                                           offset=0, length=7)])
+    priv.set_bot(fake)
+    check(any(h.check_update(Update(update_id=10, message=priv)) not in (False, None)
+              for h in handlers), "в приватном чате команда обрабатывается")
+    # Правка уже отправленной команды не должна переотправлять дневник
+    edited = Message(message_id=11, date=datetime.now(timezone.utc), chat=CHAT,
+                     from_user=USER, text="/export",
+                     entities=[MessageEntity(type=MessageEntity.BOT_COMMAND,
+                                             offset=0, length=7)])
+    edited.set_bot(fake)
+    check(not any(h.check_update(Update(update_id=11, edited_message=edited))
+                  not in (False, None) for h in handlers),
+          "правка команды не обрабатывается заново")
 
     # Нажатие инлайн-кнопки из группы: данные берутся по нажавшему, а ответ
     # ушёл бы в группу — именно так чужой дневник и утекал.
+    gmsg = Message(message_id=12, date=datetime.now(timezone.utc), chat=group,
+                   from_user=USER, text="card")
+    gmsg.set_bot(fake)
     gq = CallbackQuery(id="g", from_user=USER, chat_instance="ci", data="csv", message=gmsg)
     gq.set_bot(fake)
     fake.documents.clear(); fake.sent.clear()
@@ -444,7 +472,12 @@ async def run() -> None:
 
     # 17. M3: подделанный callback_data ничего не ломает и ничего не пишет.
     victim = db.start_episode(uid)
-    before = report.episode_card(victim, LANG)
+
+    def fields(ep):
+        return (ep.started_at, ep.ended_at, ep.severity, ep.pulse,
+                tuple(ep.symptoms), tuple(ep.triggers), ep.note, ep.end_approx)
+
+    before = fields(victim)
     hostile = [
         f"s:{victim.id}:7", f"s:{victim.id}:-1", f"s:{victim.id}:abc",
         f"ap:{victim.id}:999999999", f"ap:{victim.id}:7",
@@ -453,6 +486,13 @@ async def run() -> None:
         "r:0", "r:-5", "r:99999999999", "dn:not-a-date", "dn:0001-01-01",
         "np:999999", "np:0", "mn:1:-1", "mn:99:0", "mt:abc", "lang:xx", "s:abc:1",
         "e:", "s", "", "dy:999999",
+        # Формы, которые пропустила первая версия проверки
+        f"m:{victim.id}", f"m:{victim.id}:junk", f"nc:{victim.id}:x",
+        f"go:{victim.id}", f"apm:{victim.id}", f"c:{victim.id}:x",
+        f"mn:{victim.id}:999", "mn:0:0", "mt:0", "md:-1",
+        # Числа, не влезающие в БД: раньше это был необработанный OverflowError
+        f"md:{10 ** 30}", f"e:{2 ** 63}", f"dy:{2 ** 64}", f"s:{10 ** 40}:1",
+        f"ap:{2 ** 63}:30", "r:" + "9" * 400,
     ]
     for data in hostile:
         try:
@@ -460,9 +500,11 @@ async def run() -> None:
         except Exception as exc:  # noqa: BLE001
             check(False, f"подделанный callback уронил хендлер: {data!r} → {exc!r}")
     check(db.get_lang(uid) == LANG, "подделанный lang:xx не переключил язык")
+    check("await" not in ud,
+          f"подделанный callback не захватил ожидание ввода ({ud.get('await')})")
     after = db.get_episode(uid, victim.id)
     check(after is not None, "эпизод не удалён подделанным callback")
-    check(report.episode_card(after, LANG) == before,
+    check(fields(after) == before,
           "подделанный callback ничего не изменил в эпизоде")
     check(after.symptoms == [] and after.triggers == [],
           f"мусорные коды не попали в симптомы ({after.symptoms}, {after.triggers})")
@@ -485,8 +527,9 @@ async def run() -> None:
     shown = [n for n in db.recent_med_names(uid) if n.startswith("препарат")]
     med_id = db.all_meds(uid)[-1].id
     snapshot = ud2.get(f"med_opts:{med_id}") or []
-    check(snapshot[:len(shown)] == shown or shown[0] in snapshot, "снимок списка сохранён")
-    shown = snapshot  # дальше работаем именно с тем, что человек видел
+    check(snapshot == db.recent_med_names(uid),
+          "снимок равен тому списку, который человек увидел")
+    shown = snapshot
     # Пока карточка висит, порядок в БД меняется
     db.add_med(uid, shown[-1], db.utcnow())
     check(db.recent_med_names(uid) != shown, "порядок в БД успел измениться")
@@ -495,7 +538,52 @@ async def run() -> None:
     check(saved.name == shown[0],
           f"сохранено лекарство с нажатой кнопки ({saved.name!r} == {shown[0]!r})")
 
-    # 19. Удаление с подтверждением.
+    # 19. Проверки состояния на стороне бота (их не исполнял ни один тест).
+    probe = db.start_episode(uid)
+    await press(f"e:{probe.id}")
+    closed_dur = db.get_episode(uid, probe.id).duration()
+    check(not db.get_episode(uid, probe.id).is_open, "эпизод закрыт кнопкой")
+    fake.sent.clear(); fake.answers.clear()
+    await press(f"e:{probe.id}")  # то же нажатие на «старой» карточке
+    check(db.get_episode(uid, probe.id).duration() == closed_dur,
+          "повторное нажатие на карточке не изменило длительность")
+    check(t(LANG, "ep_state_changed") in fake.answers,
+          f"бот сказал, что состояние изменилось ({fake.answers})")
+    await press(f"sh:{probe.id}:-15")
+    check(db.get_episode(uid, probe.id).duration() == closed_dur,
+          "сдвиг начала на закрытом эпизоде отклонён")
+    await press(f"ap:{probe.id}:60")
+    check(not db.get_episode(uid, probe.id).end_approx,
+          "примерная длительность не затёрла точную")
+    # Возврат в работу применим только к закрытому
+    await press(f"ro:{probe.id}")
+    check(db.get_episode(uid, probe.id).is_open, "закрытый эпизод вернулся в работу")
+    fake.answers.clear()
+    await press(f"ro:{probe.id}")
+    check(t(LANG, "ep_state_changed") in fake.answers,
+          "повторный возврат в работу отклонён")
+
+    # «Отпустило» на забытом эпизоде: длительность 20 часов не должна
+    # записаться как точная — на свежей карточке такой кнопки уже нет, но в
+    # истории чата она осталась.
+    age_out(uid, probe.id, days=1)
+    db._db().execute("UPDATE episodes SET ended_at = NULL WHERE id = ?", (probe.id,))
+    db._db().commit()
+    stale_probe = db.get_episode(uid, probe.id)
+    check(stale_probe.is_stale(cfg.STALE_AFTER_MIN), "эпизод забыт")
+    fake.answers.clear()
+    await press(f"e:{probe.id}")
+    check(db.get_episode(uid, probe.id).is_open,
+          "«отпустило» на забытом эпизоде не закрыло его ровной длительностью")
+    check(t(LANG, "ep_state_changed") in fake.answers, "и сказало почему")
+    # Зато указать длительность по памяти можно
+    await press(f"ap:{probe.id}:60")
+    done = db.get_episode(uid, probe.id)
+    check(not done.is_open and done.end_approx,
+          "примерная длительность у забытого эпизода записывается")
+    db.delete_episode(uid, probe.id)
+
+    # 20. Удаление с подтверждением.
     last_id = db.last_episode(uid).id
     await press(f"d:{last_id}")
     check(any("Удалить эпизод" in t for t in fake.edited), "спросил подтверждение удаления")

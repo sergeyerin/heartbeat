@@ -51,8 +51,8 @@ def main() -> int:
         ep = db.toggle_code(uid, ep.id, "symptoms", "dizzy")
         ep = db.toggle_code(uid, ep.id, "symptoms", "short")  # снятие
         ep = db.toggle_code(uid, ep.id, "triggers", "coffee")
-        ep = db.append_note(uid, ep.id, "началось после кофе")
-        ep = db.append_note(uid, ep.id, "вторая строка")
+        ep, _ = db.append_note(uid, ep.id, "началось после кофе")
+        ep, _ = db.append_note(uid, ep.id, "вторая строка")
         check(ep.severity == 3 and ep.pulse == 142, "тяжесть и пульс сохранились")
         check(ep.symptoms == ["dizzy"], f"повторное нажатие снимает симптом: {ep.symptoms}")
         check(ep.triggers == ["coffee"], "триггер сохранился")
@@ -291,6 +291,19 @@ def main() -> int:
               "примерная длительность не затирает точную")
         check(db.shift_start(fuid, guard.id, -30) is None,
               "сдвиг начала у закрытого эпизода отклонён")
+        # Барьер именно в UPDATE: python-проверка выше короткого замыкания не
+        # делает, если состояние изменилось уже после неё (второй инстанс на
+        # том же файле). Эмулируем, закрыв эпизод в обход функции.
+        sql_guard = db.start_episode(fuid)
+        db._db().execute("UPDATE episodes SET ended_at = ? WHERE id = ?",
+                         (db._iso(db.utcnow()), sql_guard.id))
+        db._db().commit()
+        cur = db._db().execute(
+            "UPDATE episodes SET ended_at = ? WHERE id = ? AND user_id = ? "
+            "AND ended_at IS NULL", (db._iso(db.utcnow()), sql_guard.id, fuid))
+        check(cur.rowcount == 0, "условие в UPDATE само отклоняет повторное закрытие")
+        db.delete_episode(fuid, sql_guard.id)
+
         reopened = db.reopen_episode(fuid, guard.id)
         check(reopened is not None and reopened.is_open, "закрытый эпизод можно открыть")
         check(db.reopen_episode(fuid, guard.id) is None,
@@ -302,10 +315,13 @@ def main() -> int:
 
         # --- M5: длина заметки ограничена, карточка остаётся отправляемой ---
         wordy = db.start_episode(fuid)
-        for _ in range(10):
-            db.append_note(fuid, wordy.id, "я" * 5000)
+        statuses = [db.append_note(fuid, wordy.id, "я" * 5000)[1] for _ in range(10)]
         wordy = db.get_episode(fuid, wordy.id)
-        check(len(wordy.note) <= db.MAX_NOTE_TOTAL, f"заметка обрезана до {len(wordy.note)}")
+        check(i18n.utf16_len(wordy.note) <= db.MAX_NOTE_TOTAL,
+              f"заметка в пределах лимита ({i18n.utf16_len(wordy.note)} единиц)")
+        check(db.NOTE_FULL in statuses,
+              "переполнение сообщается статусом, а не проглатывается")
+        check(statuses[0] == db.NOTE_CHUNK_TRIMMED, "слишком долгое сообщение обрезано")
         check(len(report.episode_card(wordy, LANG)) < 4096,
               "карточка с огромной заметкой влезает в сообщение")
         many = [wordy] * 30
@@ -315,6 +331,28 @@ def main() -> int:
         check("".join(bot._split(day_long)).replace("\n", "") ==
               day_long.replace("\n", ""), "при нарезке текст не теряется")
         check(db.clear_note(fuid, wordy.id).note is None, "заметку можно очистить")
+
+        # Эмодзи — одна «буква», но две единицы для Telegram: по символам
+        # лимит давал вдвое больший запас, и карточка снова не отправлялась.
+        hearts = db.start_episode(fuid)
+        for _ in range(6):
+            db.append_note(fuid, hearts.id, "🫀" * 2000)
+        hearts = db.get_episode(fuid, hearts.id)
+        check(i18n.utf16_len(hearts.note) <= db.MAX_NOTE_TOTAL,
+              f"заметка из эмодзи в пределах лимита ({i18n.utf16_len(hearts.note)})")
+        card16 = report.episode_card(hearts, LANG)
+        check(i18n.utf16_len(card16) < 4096,
+              f"карточка из эмодзи отправляема ({i18n.utf16_len(card16)} единиц)")
+        emoji_day = report.day_summary(report.today_local(), [hearts] * 20, [], LANG)
+        chunks = bot._split(emoji_day)
+        check(all(i18n.utf16_len(c) <= bot.TG_TEXT_LIMIT for c in chunks),
+              f"сводка из эмодзи режется по UTF-16 (макс {max(i18n.utf16_len(c) for c in chunks)})")
+        check("".join(chunks).replace("\n", "") == emoji_day.replace("\n", ""),
+              "при нарезке эмодзи ничего не теряется")
+        long_line = "🫀" * 4000
+        pieces = bot._split(long_line)
+        check("".join(pieces) == long_line, "длинная строка делится, а не обрезается")
+        db.delete_episode(fuid, hearts.id)
         db.delete_episode(fuid, wordy.id)
 
         # Неожиданное значение в колонке тяжести не должно ломать сводку дня:
@@ -333,7 +371,7 @@ def main() -> int:
 
         # --- M6: формулы в CSV обезврежены во всех пользовательских колонках ---
         nasty = db.start_episode(fuid)
-        db.append_note(fuid, nasty.id, '=cmd|\'/c calc\'!A1')
+        db.append_note(fuid, nasty.id, '=cmd|\'/c calc\'!A1')[0]
         db.toggle_code(fuid, nasty.id, "symptoms", "=HYPERLINK(\"http://x\")")
         db.close_episode(fuid, nasty.id)
         db.add_med(fuid, "@SUM(1+1)")
@@ -343,9 +381,11 @@ def main() -> int:
             db.all_episodes(fuid), db.all_meds(fuid), LANG
         ).decode("utf-8-sig")
         rows = list(_csv.reader(_io.StringIO(text), delimiter=";"))
+        # Префиксы перечислены буквально, а не через report.CSV_RISKY_PREFIX:
+        # иначе сужение константы ослабило бы код и тест одновременно.
         dangerous = [
             field for row in rows[1:] for field in row
-            if field[:1] in report.CSV_RISKY_PREFIX
+            if field[:1] in ("=", "+", "-", "@", "\t", "\r")
         ]
         check(not dangerous, f"ни одна ячейка CSV не исполняется в Excel ({dangerous[:2]})")
         check(any("'=cmd" in field for row in rows for field in row),

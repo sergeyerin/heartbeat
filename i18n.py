@@ -154,7 +154,7 @@ STRINGS: dict[str, dict[str, str]] = {
               "/export — CSV со всеми записями\n"
               "/lang — язык бота\n"
               "/cancel — отменить ожидание ввода\n\n"
-              "Время хранится в UTC, показывается в зоне {tz}.",
+              "Время хранится в UTC, показывается в зоне {tz}.\n\n⚕️ Это дневник, а не медицинская рекомендация. Решения — с врачом.",
         "en": "Commands:\n"
               "/log — log the start of an episode\n"
               "/stop — mark that it stopped\n"
@@ -165,7 +165,7 @@ STRINGS: dict[str, dict[str, str]] = {
               "/export — CSV with every record\n"
               "/lang — bot language\n"
               "/cancel — cancel a pending input\n\n"
-              "Times are stored in UTC and shown in the {tz} zone.",
+              "Times are stored in UTC and shown in the {tz} zone.\n\n⚕️ This is a diary, not medical advice. Decisions belong with your doctor.",
         "pt": "Comandos:\n"
               "/log — registar o início de um episódio\n"
               "/stop — marcar que já passou\n"
@@ -176,7 +176,7 @@ STRINGS: dict[str, dict[str, str]] = {
               "/export — CSV com todos os registos\n"
               "/lang — idioma do bot\n"
               "/cancel — cancelar uma entrada pendente\n\n"
-              "As horas são guardadas em UTC e mostradas no fuso {tz}.",
+              "As horas são guardadas em UTC e mostradas no fuso {tz}.\n\n⚕️ Isto é um diário, não um conselho médico. As decisões são do seu médico.",
     },
 
     # --- выбор языка ---
@@ -246,6 +246,15 @@ STRINGS: dict[str, dict[str, str]] = {
                    "pt": "📝 Nota adicionada."},
     "note_cleared": {"ru": "📝 Заметка очищена.", "en": "📝 Note cleared.",
                      "pt": "📝 Nota apagada."},
+    "note_full": {"ru": "Заметка эпизода заполнена, поэтому я ничего не дописал — "
+                        "ваш текст не потерян, он остался в чате. Очистите заметку "
+                        "кнопкой ниже и пришлите заново.",
+                  "en": "This episode's note is full, so I appended nothing — your "
+                        "text is not lost, it is still in the chat. Clear the note "
+                        "with the button below and send it again.",
+                  "pt": "A nota deste episódio está cheia, por isso não acrescentei "
+                        "nada — o seu texto não se perdeu, continua no chat. Apague "
+                        "a nota com o botão abaixo e envie outra vez."},
     "note_trimmed": {"ru": "Заметка обрезана: максимум {n} символов.",
                      "en": "The note was trimmed: {n} characters maximum.",
                      "pt": "A nota foi cortada: máximo de {n} caracteres."},
@@ -510,6 +519,35 @@ STRINGS: dict[str, dict[str, str]] = {
 }
 
 LANG_NAMES = {"ru": "Русский", "en": "English", "pt": "Português"}
+
+
+def utf16_len(text: str) -> int:
+    """Длина так, как её считает Telegram: в UTF-16-единицах.
+
+    Эмодзи вне BMP — это одна «буква» для `len()`, но ДВЕ единицы для
+    Telegram. Поэтому `len()` завышает запас вдвое: заметка из 3000 эмодзи
+    весит 6000 единиц, и сообщение перестаёт отправляться, хотя по `len()`
+    всё в порядке.
+    """
+    return len(text.encode("utf-16-le")) // 2
+
+
+def trim_utf16(text: str, limit: int) -> str:
+    """Обрезает текст так, чтобы он влез в `limit` UTF-16-единиц.
+
+    Режет по кодовым пунктам (двоичным поиском), поэтому не разрывает
+    эмодзи на половинки суррогатной пары.
+    """
+    if utf16_len(text) <= limit:
+        return text
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if utf16_len(text[:middle]) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low]
 
 
 def normalize(code: str | None) -> str | None:

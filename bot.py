@@ -61,7 +61,13 @@ SEVERITY_LEVELS = (1, 2, 3)
 DURATION_CHOICES = (15, 30, 60, 120, 240, 480)
 
 # Какие действия над эпизодом осмысленны только в определённом состоянии.
-NEEDS_OPEN = frozenset({"e", "sh", "ap", "apm", "go", "unk"})
+# NEEDS_ACTIVE строже NEEDS_OPEN: «✅ Отпустило» и сдвиг начала применимы лишь
+# к эпизоду, который идёт прямо сейчас. На забытом эпизоде карточка намеренно
+# не предлагает «отпустило сейчас» (это была бы ложь), но старая карточка из
+# истории чата такую кнопку ещё содержит — иначе нажатие на неё записало бы
+# ровную десятичасовую длительность как точную.
+NEEDS_ACTIVE = frozenset({"e", "sh"})
+NEEDS_OPEN = frozenset({"ap", "apm", "go", "unk"})
 NEEDS_CLOSED = frozenset({"ro"})
 
 MENU_ACTIONS = ("btn_start", "btn_end", "btn_med", "btn_today", "btn_report", "btn_export")
@@ -77,12 +83,28 @@ ACTION_BY_TEXT = {
 # что угодно. Поэтому каждое значение сверяется с тем набором, из которого его
 # вообще могла бы предложить кнопка, а не просто приводится к int.
 
+# Предел для идентификаторов: sqlite3 падает с OverflowError на числах,
+# не влезающих в signed 64-bit, а это необработанное исключение на каждый
+# подделанный payload.
+SQLITE_MAX_INT = 2 ** 63 - 1
+
+
 def _arg(parts: list[str], index: int, allowed=None) -> int | None:
     try:
         value = int(parts[index])
     except (IndexError, ValueError, TypeError):
         return None
+    if abs(value) > SQLITE_MAX_INT:
+        return None
     if allowed is not None and value not in allowed:
+        return None
+    return value
+
+
+def _row_id(parts: list[str], index: int = 1) -> int | None:
+    """Идентификатор строки из payload: только положительный и влезающий в БД."""
+    value = _arg(parts, index)
+    if value is None or value <= 0:
         return None
     return value
 
@@ -90,10 +112,7 @@ def _arg(parts: list[str], index: int, allowed=None) -> int | None:
 def _episode_id(parts: list[str]) -> int | None:
     if len(parts) < 2 or not parts[1].isdecimal():
         return None
-    try:
-        return int(parts[1])
-    except ValueError:
-        return None
+    return _row_id(parts)
 
 
 # --- язык ------------------------------------------------------------------
@@ -262,6 +281,25 @@ def _lang_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _note_header(lang: str, status: str, base: str | None = None) -> str:
+    header = base or t(lang, "note_saved")
+    if status == db.NOTE_CHUNK_TRIMMED:
+        header += "\n" + t(lang, "note_trimmed", n=db.MAX_NOTE_CHUNK)
+    return header
+
+
+async def _note_full(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                     ep: db.Episode, lang: str) -> None:
+    """Места в заметке не осталось: говорим прямо и даём кнопку очистки."""
+    await context.bot.send_message(
+        update.effective_chat.id,
+        t(lang, "note_full"),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(t(lang, "btn_clear_note"), callback_data=f"nc:{ep.id}")
+        ]]),
+    )
+
+
 # --- отправка длинных текстов ----------------------------------------------
 # Лимит сообщения Telegram — 4096, причём считаются UTF-16-единицы, а не
 # символы, поэтому берём запас. Сводка за день с десятком эпизодов или отчёт
@@ -271,18 +309,28 @@ TG_TEXT_LIMIT = 3800
 
 
 def _split(text: str, limit: int = TG_TEXT_LIMIT) -> list[str]:
-    """Режет текст по строкам, чтобы каждая часть влезала в сообщение."""
-    if len(text) <= limit:
+    """Режет текст на части, влезающие в сообщение. Длина — в UTF-16-единицах.
+
+    Слишком длинная строка не обрезается, а делится: терять хвост молча нельзя,
+    это данные человека.
+    """
+    if i18n.utf16_len(text) <= limit:
         return [text]
+    pieces: list[str] = []
+    for line in text.split("\n"):
+        while i18n.utf16_len(line) > limit:
+            head = i18n.trim_utf16(line, limit)
+            pieces.append(head)
+            line = line[len(head):]
+        pieces.append(line)
     parts: list[str] = []
     current = ""
-    for line in text.split("\n"):
-        line = line[:limit]
-        if current and len(current) + len(line) + 1 > limit:
+    for piece in pieces:
+        if current and i18n.utf16_len(current) + i18n.utf16_len(piece) + 1 > limit:
             parts.append(current)
-            current = line
+            current = piece
         else:
-            current = f"{current}\n{line}" if current else line
+            current = f"{current}\n{piece}" if current else piece
     if current:
         parts.append(current)
     return parts
@@ -291,6 +339,8 @@ def _split(text: str, limit: int = TG_TEXT_LIMIT) -> list[str]:
 async def _send_text(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str,
                      reply_markup=None) -> None:
     """Отправляет текст, при необходимости частями. Клавиатура — к последней."""
+    if not text:
+        return
     chunks = _split(text)
     for index, chunk in enumerate(chunks):
         await context.bot.send_message(
@@ -301,7 +351,13 @@ async def _send_text(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str
 
 async def _edit_text(query, context, text: str, reply_markup=None) -> None:
     """Правит сообщение на месте; слишком длинный текст досылает новым."""
-    if len(text) > TG_TEXT_LIMIT:
+    if i18n.utf16_len(text) > TG_TEXT_LIMIT:
+        # Не влезает в правку — досылаем новым, а у старого снимаем клавиатуру,
+        # чтобы она не осталась активной и не вводила в заблуждение.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         await _send_text(context, query.message.chat_id, text, reply_markup)
         return
     try:
@@ -351,9 +407,14 @@ async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE, ep: db.
     await _send_text(context, update.effective_chat.id, text, card_keyboard(ep, lang))
 
 
-async def _refresh(query, ep: db.Episode, lang: str) -> None:
+async def _refresh(query, ep: db.Episode | None, lang: str) -> None:
     """Перерисовывает карточку на месте. Повторное нажатие той же кнопки даёт
-    тот же текст — Telegram отвечает 'message is not modified', это не ошибка."""
+    тот же текст — Telegram отвечает 'message is not modified', это не ошибка.
+
+    ``ep`` может быть None: эпизод успели удалить между выборкой и перерисовкой.
+    """
+    if ep is None:
+        return
     try:
         await query.edit_message_text(
             report.episode_card(ep, lang), reply_markup=card_keyboard(ep, lang)
@@ -530,8 +591,18 @@ async def action_end_episode(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         await _mention_forgotten(update.effective_chat.id, user_id, context, lang)
         return
-    ep = db.close_episode(user_id, ep.id, ended_at=update.message.date)
-    _cancel_reminder(context.job_queue, user_id, ep.id)
+    episode_id = ep.id
+    closed = db.close_episode(user_id, episode_id, ended_at=update.message.date)
+    if closed is None:
+        # Эпизод закрыли другим путём между выборкой и записью (второй инстанс
+        # на том же файле — известное состояние, см. CLAUDE.md).
+        await update.message.reply_text(
+            t(lang, "ep_state_changed"),
+            reply_markup=main_keyboard(_active(user_id) is not None, lang),
+        )
+        return
+    ep = closed
+    _cancel_reminder(context.job_queue, user_id, episode_id)
     await update.message.reply_text(
         t(lang, "ep_closed", id=ep.id, dur=report.human_duration(ep.duration(), lang)),
         reply_markup=main_keyboard(False, lang),
@@ -679,14 +750,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         if kind == "note":
             context.user_data.pop("await", None)
-            ep = db.append_note(user_id, target_id, text)
-            if ep:
-                header = t(lang, "note_saved")
-                if len(text) > db.MAX_NOTE_CHUNK:
-                    header += "\n" + t(lang, "note_trimmed", n=db.MAX_NOTE_CHUNK)
-                await _send_card(update, context, ep, lang, header)
-            else:
+            ep, status = db.append_note(user_id, target_id, text)
+            if ep is None:
                 await update.message.reply_text(t(lang, "ep_gone", id=target_id))
+            elif status == db.NOTE_FULL:
+                await _note_full(update, context, ep, lang)
+            else:
+                await _send_card(update, context, ep, lang, _note_header(lang, status))
             return
         if kind == "med":
             context.user_data.pop("await", None)
@@ -726,11 +796,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ]]),
         )
         return
-    ep = db.append_note(user_id, ep.id, text)
-    header = t(lang, "note_appended", id=ep.id)
-    if len(text) > db.MAX_NOTE_CHUNK:
-        header += "\n" + t(lang, "note_trimmed", n=db.MAX_NOTE_CHUNK)
-    await _send_card(update, context, ep, lang, header)
+    ep, status = db.append_note(user_id, ep.id, text)
+    if status == db.NOTE_FULL:
+        await _note_full(update, context, ep, lang)
+        return
+    await _send_card(update, context, ep, lang,
+                     _note_header(lang, status, t(lang, "note_appended", id=ep.id)))
 
 
 # --- inline-кнопки ---------------------------------------------------------
@@ -811,13 +882,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if existing is not None:
             # Эпизод успел начаться другим путём — дописываем в него, а не
             # создаём второй открытый.
-            ep = db.append_note(user_id, existing.id, note) if note else existing
+            ep = db.append_note(user_id, existing.id, note)[0] if note else existing
             await query.edit_message_text(t(lang, "note_appended", id=ep.id))
             await _send_card(update, context, ep, lang)
             return
         ep = db.start_episode(user_id)
         if note:
-            ep = db.append_note(user_id, ep.id, note)
+            ep = db.append_note(user_id, ep.id, note)[0]
         await query.edit_message_text(t(lang, "ep_recorded", id=ep.id))
         await _send_card(update, context, ep, lang)
         _schedule_reminder(context.job_queue, user_id, ep.id, config.EPISODE_WINDOW_MIN)
@@ -851,8 +922,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         _schedule_reminder(context.job_queue, user_id, ep.id, config.EPISODE_WINDOW_MIN)
         return
     if action in ("mn", "mt", "md"):  # лекарство: имя из истории / ввести / отменить
-        med_id = _arg(parts, 1)
-        if med_id is None or med_id < 0:
+        med_id = _row_id(parts)
+        med = db.get_med(user_id, med_id) if med_id is not None else None
+        if med is None:
+            # Чужой или несуществующий id: ничего не делаем и, главное, не
+            # переводим бота в режим ожидания ввода для этой записи.
             await ack()
             return
         if action == "mn":
@@ -869,14 +943,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 await query.edit_message_text(t(lang, "med_saved", name=name))
             else:
                 await ack(t(lang, "med_list_stale"))
-                await query.message.reply_text(t(lang, "med_name_prompt"))
-                context.user_data["await"] = {"what": "med", "id": med_id}
+                if med.name is None:
+                    # Снимок потерян рестартом — просим название, но только для
+                    # ещё не названной своей записи.
+                    await query.message.reply_text(t(lang, "med_name_prompt"))
+                    context.user_data["await"] = {"what": "med", "id": med_id}
             return
         if action == "mt":
+            context.user_data.pop(f"med_opts:{med_id}", None)
             context.user_data["await"] = {"what": "med", "id": med_id}
             await ack()
             await query.edit_message_text(t(lang, "med_name_prompt"))
             return
+        context.user_data.pop(f"med_opts:{med_id}", None)
         db.delete_med(user_id, med_id)
         await ack(t(lang, "ack_deleted"))
         await query.edit_message_text(t(lang, "med_deleted"))
@@ -901,6 +980,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # эпизоду, который с тех пор изменился, нельзя: так закрытый эпизод получал
     # новое время окончания, а длительность 20 минут превращалась в 2 часа.
     if action in NEEDS_OPEN and not ep.is_open:
+        await ack(t(lang, "ep_state_changed"))
+        await _refresh(query, ep, lang)
+        return
+    if action in NEEDS_ACTIVE and (
+        not ep.is_open or ep.is_stale(config.STALE_AFTER_MIN)
+    ):
         await ack(t(lang, "ep_state_changed"))
         await _refresh(query, ep, lang)
         return
@@ -951,7 +1036,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _send_card(update, context, ep, lang)
         return
     if action == "m":
-        kind = parts[2]
+        kind = parts[2] if len(parts) > 2 else ""
+        if kind not in ("sym", "trg"):
+            await ack()
+            return
         await ack()
         try:
             await query.edit_message_text(
@@ -1135,8 +1223,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.exception("Ошибка обработчика", exc_info=context.error)
-    chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
-    if chat_id:
+    chat = getattr(update, "effective_chat", None)
+    chat_id = getattr(chat, "id", None)
+    if chat_id and getattr(chat, "type", None) == Chat.PRIVATE:
         lang = _job_lang(chat_id)
         try:
             await context.bot.send_message(
@@ -1188,15 +1277,19 @@ async def post_init(app) -> None:
     await app.bot.set_my_commands(_commands(config.DEFAULT_LANG))
 
 
-def build_app():
-    config.check()
-    db.init(config.DB_PATH)
-    app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+def register_handlers(app) -> None:
+    """Регистрирует все хендлеры. Вынесено из build_app, чтобы тесты проверяли
+    ровно тот набор, который работает в боте, а не его копию рядом.
 
-    # Только приватные диалоги. В группе бот отвечал бы тому чату, где нажали
-    # кнопку, а данные брал по нажавшему: сосед по группе мог бы спровоцировать
-    # публикацию чужого дневника. Дублирует настройку /setjoingroups в BotFather,
-    # потому что настройка — в одном переключателе от того, чтобы стать неверной.
+    Только приватные диалоги: в группе бот отвечал бы тому чату, где нажали
+    кнопку, а данные брал по нажавшему — сосед по группе мог бы спровоцировать
+    публикацию чужого дневника. Дублирует настройку /setjoingroups в BotFather,
+    потому что настройка в одном переключателе от того, чтобы стать неверной.
+
+    UpdateType.MESSAGE отсекает edited_message и business_message: у них
+    update.message пустой, а правка опечатки в уже отправленной команде
+    переотправляла бы весь дневник заново.
+    """
     for name, handler in (
         ("start", cmd_start), ("help", cmd_help), ("lang", cmd_lang),
         ("cancel", cmd_cancel), ("log", action_start_episode),
@@ -1204,13 +1297,25 @@ def build_app():
         ("today", action_today), ("yesterday", cmd_yesterday),
         ("week", cmd_week), ("month", cmd_month), ("export", action_export),
     ):
-        app.add_handler(CommandHandler(name, handler, filters=PRIVATE))
+        app.add_handler(CommandHandler(
+            name, handler, filters=PRIVATE & filters.UpdateType.MESSAGE
+        ))
 
-    app.add_handler(
-        MessageHandler(filters.Text(list(ACTION_BY_TEXT)) & PRIVATE, on_menu_button)
-    )
+    app.add_handler(MessageHandler(
+        filters.Text(list(ACTION_BY_TEXT)) & PRIVATE & filters.UpdateType.MESSAGE,
+        on_menu_button,
+    ))
     app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & PRIVATE, on_text))
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & PRIVATE & filters.UpdateType.MESSAGE, on_text
+    ))
+
+
+def build_app():
+    config.check()
+    db.init(config.DB_PATH)
+    app = ApplicationBuilder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    register_handlers(app)
     app.add_error_handler(on_error)
     return app
 
@@ -1221,7 +1326,12 @@ def main() -> None:
              config.TZ_NAME, config.DB_PATH, ",".join(i18n.SUPPORTED))
     # drop_pending_updates=False: нажатия, сделанные пока бот лежал, обработаются
     # после старта — и попадут в дневник временем нажатия (см. action_start_episode).
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+    app.run_polling(
+        # Только то, что бот действительно обрабатывает: ALL_TYPES втягивал
+        # правки сообщений и business_message, у которых update.message пустой.
+        allowed_updates=[Update.MESSAGE, Update.CALLBACK_QUERY],
+        drop_pending_updates=False,
+    )
 
 
 if __name__ == "__main__":

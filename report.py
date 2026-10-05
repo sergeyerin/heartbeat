@@ -117,7 +117,12 @@ def episode_card(ep: Episode, lang: str) -> str:
               start=hhmm(ep.started_at), end=hhmm(ep.ended_at))
             + (t(lang, "card_approx_suffix") if ep.end_approx else "")
         )
-    severity = vocab.severity(lang).get(ep.severity) if ep.severity else t(lang, "dash")
+    # Значение по умолчанию обязательно: иначе неожиданное число в колонке
+    # выводилось пользователю как литерал «None».
+    severity = (
+        vocab.severity(lang).get(ep.severity, str(ep.severity))
+        if ep.severity else t(lang, "dash")
+    )
     lines.append(t(lang, "card_severity", value=severity))
     lines.append(t(lang, "card_pulse", value=ep.pulse or t(lang, "dash")))
     if ep.symptoms:
