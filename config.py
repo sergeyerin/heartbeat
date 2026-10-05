@@ -18,7 +18,7 @@ DB_PATH = os.getenv("DB_PATH", "data/heartbeat.db")
 # Зона для отображения времени. В БД всё лежит в UTC.
 TZ_NAME = os.getenv("TZ", "Europe/Moscow")
 
-# Язык по умолчанию: берётся, когда профиль Telegram не на ru/en/pt и
+# Язык по умолчанию: берётся, когда профиль Telegram не на ru/en и
 # пользователь не выбрал язык сам командой /lang.
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "en")
 

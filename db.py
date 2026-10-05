@@ -109,6 +109,18 @@ class Episode:
         anchor = self.confirmed_at or self.started_at
         return (now or utcnow()) - anchor >= timedelta(minutes=stale_after_min)
 
+    def needs_end(self, stale_after_min: int, now: datetime | None = None) -> bool:
+        """Открыт, но «идёт» про него сказать нельзя: окончание объявлено
+        неизвестным («🤷 Не знаю», ретроспектива) или эпизод забыт.
+
+        Везде, где карточка, сводка или кнопки ветвятся по «забыт ли», ветвиться
+        надо по этому методу: свежая ретроспективная запись с неизвестным концом
+        рисовалась как «идёт, уже 29 мин», перехватывала свободный ввод и
+        блокировала «⚡️ Аритмия» — а при живом приступе воровала у него статус
+        текущего, и «✅ Отпустило» закрывало её точным выдуманным временем.
+        """
+        return self.is_open and (self.end_unknown or self.is_stale(stale_after_min, now))
+
     def duration(self, now: datetime | None = None) -> timedelta:
         end = self.ended_at or (now or utcnow())
         return end - self.started_at
@@ -252,8 +264,10 @@ def active_episode(user_id: int, stale_after_min: int) -> Episode | None:
     """
     cutoff = _iso(utcnow() - timedelta(minutes=stale_after_min))
     row = _db().execute(
+        # end_unknown = 0 обязателен: человек сам сказал «не знаю, когда
+        # кончилось» — такой эпизод по его же заявлению НЕ идёт сейчас.
         "SELECT * FROM episodes WHERE user_id = ? AND ended_at IS NULL "
-        "AND COALESCE(confirmed_at, started_at) > ? "
+        "AND end_unknown = 0 AND COALESCE(confirmed_at, started_at) > ? "
         "ORDER BY started_at DESC, id DESC LIMIT 1",
         (user_id, cutoff),
     ).fetchone()
@@ -319,7 +333,9 @@ def confirm_still_on(user_id: int, episode_id: int) -> Episode | None:
     проверки в боте, как у close_episode.
     """
     cur = _db().execute(
-        "UPDATE episodes SET confirmed_at = ? "
+        # «Ещё идёт» снимает и «не знаю»: раз идёт — конец не неизвестен,
+        # его просто ещё нет.
+        "UPDATE episodes SET confirmed_at = ?, end_unknown = 0 "
         "WHERE id = ? AND user_id = ? AND ended_at IS NULL",
         (_iso(utcnow()), episode_id, user_id),
     )
@@ -353,7 +369,9 @@ def close_episode(user_id: int, episode_id: int, ended_at: datetime | None = Non
     if end < ep.started_at:
         end = ep.started_at
     cur = _db().execute(
-        "UPDATE episodes SET ended_at = ?, end_approx = ? "
+        # end_unknown снимается: окончание записано, неизвестным оно больше
+        # не является — иначе закрытая строка навсегда несла противоречие.
+        "UPDATE episodes SET ended_at = ?, end_approx = ?, end_unknown = 0 "
         "WHERE id = ? AND user_id = ? AND ended_at IS NULL",
         (_iso(end), 1 if approx else 0, episode_id, user_id),
     )
@@ -622,6 +640,16 @@ def purge_user(user_id: int) -> dict[str, int]:
         _db().execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
     _db().commit()
     return counts
+
+
+def episode_at(user_id: int, started_at: datetime) -> Episode | None:
+    """Эпизод, начатый ровно в этот момент. Защита от повторной кнопки:
+    два настоящих приступа в одну и ту же минуту не записать и вручную."""
+    row = _db().execute(
+        "SELECT * FROM episodes WHERE user_id = ? AND started_at = ? LIMIT 1",
+        (user_id, _iso(started_at)),
+    ).fetchone()
+    return _row_to_episode(row) if row else None
 
 
 def count_episodes(user_id: int) -> int:

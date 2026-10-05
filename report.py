@@ -107,7 +107,7 @@ def place_link(ep: Episode) -> str | None:
 def episode_card(ep: Episode, lang: str) -> str:
     now = datetime.now(timezone.utc)
     lines = []
-    if ep.is_open and ep.is_stale(config.STALE_AFTER_MIN):
+    if ep.needs_end(config.STALE_AFTER_MIN):
         lines.append(t(lang, "card_stale", id=ep.id))
         lines.append(t(lang, "card_start", day=_day_prefix(ep.started_at, lang),
                        time=hhmm(ep.started_at)))
@@ -159,7 +159,7 @@ def episode_card(ep: Episode, lang: str) -> str:
 # --- сводка за день --------------------------------------------------------
 
 def _episode_line(ep: Episode, now: datetime, lang: str) -> list[str]:
-    if ep.is_open and ep.is_stale(config.STALE_AFTER_MIN):
+    if ep.needs_end(config.STALE_AFTER_MIN):
         head = t(lang, "line_stale", time=hhmm(ep.started_at))
     elif ep.is_open:
         head = t(lang, "line_open", time=hhmm(ep.started_at),
@@ -260,7 +260,7 @@ def period_report(days: int, episodes: list[Episode], meds: list[Med], lang: str
         approx = sum(1 for ep in closed if ep.end_approx)
         if approx:
             lines.append(t(lang, "rep_approx", n=approx))
-    stale = [ep for ep in episodes if ep.is_open and ep.is_stale(config.STALE_AFTER_MIN)]
+    stale = [ep for ep in episodes if ep.needs_end(config.STALE_AFTER_MIN)]
     if stale:
         lines.append(t(lang, "rep_stale", n=len(stale)))
     if len(episodes) - len(closed) - len(stale):

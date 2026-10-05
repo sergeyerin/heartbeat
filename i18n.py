@@ -140,6 +140,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Команды:\n"
               "/log — записать начало эпизода\n"
               "/stop — отметить, что отпустило\n"
+              "/earlier — записать прошедший приступ\n"
               "/last — карточка последнего эпизода\n"
               "/med — отметить приём лекарства\n"
               "/today, /yesterday — сводка за день\n"
@@ -158,6 +159,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "Commands:\n"
               "/log — log the start of an episode\n"
               "/stop — mark that it stopped\n"
+              "/earlier — log a past episode\n"
               "/last — card of the latest episode\n"
               "/med — log medication\n"
               "/today, /yesterday — daily summary\n"
@@ -408,6 +410,45 @@ STRINGS: dict[str, dict[str, str]] = {
     "export_cooldown": {"ru": "Выгрузку только что делали — подождите минуту.",
                         "en": "You exported just now — give it a minute."},
     "cmd_forget": {"ru": "удалить все мои записи", "en": "delete all my records"},
+    # --- ретроспективная запись: приступ, который уже прошёл ---
+    # Решения владельца: только кнопки (ручного ввода дат и времени нет),
+    # только сегодня/вчера/позавчера, окончание — примерной длительностью.
+    "cmd_earlier": {"ru": "записать прошедший приступ", "en": "log a past episode"},
+    "btn_backfill": {"ru": "➕ Приступ в этот день", "en": "➕ Episode on this day"},
+    "btn_day_today": {"ru": "Сегодня", "en": "Today"},
+    "btn_day_yesterday": {"ru": "Вчера", "en": "Yesterday"},
+    "btn_day_before": {"ru": "Позавчера", "en": "2 days ago"},
+    "btn_back_step": {"ru": "← Назад", "en": "← Back"},
+    "back_intro": {
+        "ru": "Запишем приступ, который уже прошёл. Когда это было?",
+        "en": "Let's log an episode that is already over. When was it?",
+    },
+    "back_ask_hour": {"ru": "{date}. В каком часу начался приступ?",
+                      "en": "{date}. What hour did the episode start?"},
+    "back_today_hours_note": {"ru": "Показываю только часы, которые уже прошли.",
+                              "en": "Only hours that have already passed are shown."},
+    "back_ask_minute": {"ru": "Около какого времени? Выберите ближайшее.",
+                        "en": "Roughly what time? Pick the closest."},
+    "back_ask_duration": {
+        "ru": "Начало — {date} в {time}. Сколько примерно длился приступ?",
+        "en": "Started {date} at {time}. Roughly how long did it last?",
+    },
+    "back_duplicate": {
+        "ru": "Этот приступ уже записан — вот его карточка.",
+        "en": "That episode is already recorded — here is its card.",
+    },
+    "back_saved": {
+        "ru": "✅ Записал приступ: {date}, {start}–{end}, примерно {dur}. "
+              "Остальное можно уточнить на карточке.",
+        "en": "✅ Logged an episode: {date}, {start}–{end}, roughly {dur}. "
+              "You can fill in the rest on the card.",
+    },
+    "back_saved_unknown": {
+        "ru": "✅ Записал приступ: {date} в {time}. Длительность неизвестна — "
+              "в отчёте он отдельной строкой.",
+        "en": "✅ Logged an episode: {date} at {time}. Duration unknown — "
+              "the report lists it separately.",
+    },
     "nothing_to_export": {"ru": "Пока нечего выгружать — записей нет.",
                           "en": "Nothing to export yet — no records.",
 },

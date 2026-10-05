@@ -1153,6 +1153,197 @@ async def run() -> None:
           "причины независимы между собой")
     db.delete_episode(uid, pair_ep.id)
 
+    # 19n. Ретроспективная запись: приступ, который уже прошёл.
+    while bot._current_episode(uid) is not None:
+        cur = bot._current_episode(uid)
+        db.close_episode(uid, cur.id)
+        age_out(uid, cur.id, days=3)
+
+    today_d = report.today_local()
+    yd = today_d - timedelta(days=1)
+    now_local = report.local(db.utcnow())
+
+    # Полный путь кнопками: вчера → 23 часа → 23:40 → 30 минут.
+    before_bf = db.count_episodes(uid)
+    fake.edited.clear(); fake.markups.clear()
+    await press(f"bf:d:{yd}")
+    hour_btns = [b for m in fake.markups if m
+                 for row in getattr(m, "inline_keyboard", []) for b in row]
+    check(any(b.callback_data == f"bf:h:{yd}:23" for b in hour_btns),
+          "для вчера предлагаются все 24 часа")
+    await press(f"bf:h:{yd}:23")
+    minute_btns = [b for m in fake.markups if m
+                   for row in getattr(m, "inline_keyboard", []) for b in row
+                   if (b.callback_data or "").startswith("bf:m:")]
+    check(any(b.text == "23:40" for b in minute_btns),
+          "минуты подписаны полным временем — выбор самопроверяемый")
+    await press(f"bf:m:{yd}:23:40")
+    await press(f"bf:f:{yd}:23:40:30")
+    check(db.count_episodes(uid) == before_bf + 1, "эпизод создан")
+    made = max(db.all_episodes(uid), key=lambda e: e.id)
+    local_start = report.local(made.started_at)
+    check((local_start.hour, local_start.minute) == (23, 40),
+          f"начало — вчерашние 23:40 ({local_start:%H:%M})")
+    check(local_start.date() == yd, "и именно вчера")
+    check(not made.is_open and made.end_approx,
+          "эпизод закрыт, длительность честно помечена примерной")
+    check(made.duration() == timedelta(minutes=30), "длительность 30 минут")
+
+    # Повтор той же кнопки: близнец не создаётся, показывается существующий.
+    fake.edited.clear()
+    await press(f"bf:f:{yd}:23:40:30")
+    check(db.count_episodes(uid) == before_bf + 1,
+          "повторная кнопка не создала эпизод-близнец")
+    check(any(t(LANG, "back_duplicate") in m for m in fake.edited),
+          "и бот объяснил, что приступ уже записан")
+    db.delete_episode(uid, made.id)
+
+    # «Не знаю» с НЕДАВНИМ сегодняшним началом: эпизод обязан быть инертным.
+    # Верификация нашла: раньше он становился текущим — рисовался «идёт, уже
+    # 29 мин», блокировал «⚡️» и воровал ввод у настоящего приступа.
+    recent_hour = now_local.hour
+    recent_min = (now_local.minute // 10) * 10
+    await press(f"bf:f:{today_d}:{recent_hour}:{recent_min}:x")
+    unk = max(db.all_episodes(uid), key=lambda e: e.id)
+    check(unk.is_open and unk.end_unknown, "эпизод открыт и помечен «не знаю»")
+    check(unk.needs_end(cfg.STALE_AFTER_MIN),
+          "needs_end: сказать «идёт» про него нельзя")
+    check(db.active_episode(uid, cfg.STALE_AFTER_MIN) is None,
+          "свежий «не знаю» НЕ считается текущим")
+    check(f"tick:{uid}:{unk.id}" not in JQ.store,
+          "и его карточка не тикает «идёт уже N минут»")
+    card_unk = report.episode_card(db.get_episode(uid, unk.id), LANG)
+    check("идёт" not in card_unk and "окончание не отмечено" in card_unk,
+          f"карточка честная: окончание не отмечено, а не «идёт»")
+    kb_unk = [b.callback_data for row in
+              bot.card_keyboard(db.get_episode(uid, unk.id), LANG).inline_keyboard
+              for b in row]
+    check(f"e:{unk.id}" not in kb_unk and f"dp:{unk.id}" in kb_unk,
+          "вместо «Отпустило» — вопрос о длительности")
+    # Подделанное «Отпустило» не фабрикует точное время окончания
+    await press(f"e:{unk.id}")
+    check(db.get_episode(uid, unk.id).is_open,
+          "форсированное «Отпустило» не закрыло его точным временем")
+    # «⚡️ Аритмия» не заблокирована
+    await tap(t(LANG, "btn_start"))
+    live2 = db.active_episode(uid, cfg.STALE_AFTER_MIN)
+    check(live2 is not None and live2.id != unk.id,
+          "«⚡️» записывает настоящий приступ, несмотря на «не знаю» рядом")
+    # Свободный ввод идёт в живой эпизод, а не в «не знаю»
+    await tap("142")
+    check(db.get_episode(uid, live2.id).pulse == 142, "пульс — в живой эпизод")
+    check(db.get_episode(uid, unk.id).pulse is None, "а не в инертный")
+    # Закрытие по кнопке длительности снимает отметку «не знаю»
+    await press(f"ap:{unk.id}:15")
+    unk_after = db.get_episode(uid, unk.id)
+    check(not unk_after.is_open and not unk_after.end_unknown,
+          "закрытие длительностью снимает отметку «не знаю»")
+    await press(f"e:{live2.id}")
+    db.delete_episode(uid, live2.id); db.delete_episode(uid, unk.id)
+
+    # Живой эпизод неприкосновенен и для обычной (закрытой) ретроспективы.
+    await tap(t(LANG, "btn_start"))
+    live_ep = db.active_episode(uid, cfg.STALE_AFTER_MIN)
+    live_card = db.get_episode(uid, live_ep.id).card_msg
+    live_tick = f"tick:{uid}:{live_ep.id}"
+    check(live_tick in JQ.store, "живая карточка обновляется")
+    await press(f"bf:f:{yd}:22:10:60")
+    check(db.active_episode(uid, cfg.STALE_AFTER_MIN).id == live_ep.id,
+          "текущий эпизод остался текущим")
+    check(db.get_episode(uid, live_ep.id).card_msg == live_card,
+          "живая карточка не тронута")
+    check(live_tick in JQ.store, "и продолжает обновляться")
+    backfilled = max(db.all_episodes(uid), key=lambda e: e.id)
+    db.delete_episode(uid, backfilled.id)
+    await press(f"e:{live_ep.id}")
+    db.delete_episode(uid, live_ep.id)
+
+    # Подделанные payload: мимо окна, мимо наборов, нестрогие числа, арность.
+    before_hostile = db.count_episodes(uid)
+    hostile_bf = [
+        f"bf:d:{today_d - timedelta(days=9)}",   # за окном владельца
+        f"bf:d:{today_d + timedelta(days=1)}",   # завтра
+        "bf:d:5", "bf:d:не-дата", f"bf:h:{yd}:99", f"bf:h:{yd}:٣",
+        f"bf:m:{yd}:23:7", f"bf:f:{yd}:23:40:7",
+        f"bf:f:{yd}:23:40:+30", f"bf:f:{yd}:23:40:1_5",
+        f"bf:f:{yd}:23:40:30:хвост",             # лишний сегмент
+        f"bf:f:{yd}:23:40", "bf:f", "bf:zzz", "bf",
+    ]
+    if now_local.hour < 23:
+        hostile_bf.append(f"bf:f:{today_d}:{now_local.hour + 1}:0:15")
+        hostile_bf.append(f"bf:f:{today_d}:{now_local.hour + 1}:0:x")
+    for data in hostile_bf:
+        await press(data)
+    check(db.count_episodes(uid) == before_hostile,
+          "ни один подделанный bf-payload не создал эпизод")
+
+    # Будущее отклоняется и на уровне функции (не зависит от часа суток,
+    # кроме ровно 23:59) — это убийца мутации «выкинули проверку будущего».
+    if now_local.minute < 59:
+        check(bot._backfill_start(today_d, now_local.hour, 59) is None,
+              "функция старта отклоняет будущую минуту")
+
+    # Сетка минут для текущего часа не предлагает будущего — убийца мутации
+    # «выкинули фильтр из клавиатуры минут».
+    kb_min = bot._backfill_minute_keyboard(today_d, now_local.hour, LANG)
+    offered = [b.callback_data for row in kb_min.inline_keyboard for b in row
+               if (b.callback_data or "").startswith("bf:m:")]
+    check(all(int(c.rsplit(":", 1)[-1]) <= now_local.minute for c in offered),
+          f"минутная сетка не предлагает будущего ({offered})")
+    check(offered, "и хотя бы одна прошедшая минута предложена")
+
+    # Будущий час форсированным payload — отказ, а не экран-тупик из «Назад».
+    fake.edited.clear()
+    if now_local.hour < 23:
+        await press(f"bf:h:{today_d}:{now_local.hour + 1}")
+        check(not fake.edited, "будущий час: отказ без экрана-тупика")
+
+    # Сетка часов для «сегодня» не предлагает будущего.
+    _, today_kb = bot._backfill_hour_screen(today_d, LANG)
+    hours_offered = [int(b.text) for row in today_kb.inline_keyboard
+                     for b in row if b.text.isdigit()]
+    check(max(hours_offered) == now_local.hour,
+          f"сегодня последний час — текущий ({max(hours_offered)})")
+
+    # Кнопка в сводке дня: есть у свежих дней, нет у старых, дата абсолютная.
+    kb_today = bot._day_keyboard(today_d, LANG)
+    flat_today = [b.callback_data for row in kb_today.inline_keyboard for b in row]
+    check(f"bf:n:{today_d}" in flat_today,
+          "в сегодняшней сводке вход в ретроспективу с абсолютной датой")
+    kb_old = bot._day_keyboard(today_d - timedelta(days=10), LANG)
+    flat_old = [(b.callback_data or "") for row in kb_old.inline_keyboard for b in row]
+    check(not any(c.startswith("bf:") for c in flat_old),
+          "у старых дней входа нет — владелец ограничил тремя днями")
+    fake.sent.clear()
+    await press(f"bf:n:{yd}")
+    check(fake.sent, "вход из сводки присылает новое сообщение, сводка цела")
+
+    # Отклонённый мусор не сжигает слот лимита частоты у честного нажатия.
+    saved_interval = cfg.MIN_ACTION_INTERVAL_SEC
+    cfg.MIN_ACTION_INTERVAL_SEC = 60
+    ud.pop("rl:episode", None)
+    await press(f"bf:f:{yd}:21:0:7")      # мусор: длительность не из набора
+    await press(f"bf:f:{yd}:21:0:15")     # честное нажатие сразу после
+    fresh = max(db.all_episodes(uid), key=lambda e: e.id)
+    check(report.local(fresh.started_at).hour == 21,
+          "мусор не съел слот частоты: честное нажатие записано")
+    fake.answers.clear()
+    await press(f"bf:f:{yd}:20:0:15")     # а вот теперь слот занят
+    check(t(LANG, "too_fast") in fake.answers, "второе честное — уже «слишком часто»")
+    cfg.MIN_ACTION_INTERVAL_SEC = saved_interval
+    ud.pop("rl:episode", None)
+    db.delete_episode(uid, fresh.id)
+
+    # Лимит объяснён и здесь.
+    saved_cap = cfg.MAX_EPISODES_PER_USER
+    cfg.MAX_EPISODES_PER_USER = db.count_episodes(uid)
+    fake.sent.clear()
+    await press(f"bf:d:{yd}")
+    check(any(t(LANG, "too_many_episodes", n=cfg.MAX_EPISODES_PER_USER) in m
+              for m in fake.sent),
+          "переполненный дневник объяснён на входе в ретроспективу")
+    cfg.MAX_EPISODES_PER_USER = saved_cap
+
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять
     if db.last_episode(uid) is None:

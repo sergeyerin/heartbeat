@@ -15,7 +15,7 @@ import io
 import logging
 import re
 import secrets
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from telegram import (
     BotCommand,
@@ -62,6 +62,13 @@ SHIFT_CHOICES = (5, 15, 30)
 # а предлагать её — приглашать ковыряться. Реальная задержка это «задремал»
 # (15–30) или «уснул, увлёкся» (45–90), и 45 набирается двумя нажатиями.
 END_SHIFT_CHOICES = (15, 30, 60)
+
+# Ретроспективная запись. Состояние потока живёт в payload кнопки, а не в
+# user_data: `bf:f:2:23:40:30` — 15 байт из 64 доступных, переживает рестарт,
+# не перехватывает свободный текст (который должен оставаться заметкой к
+# живому эпизоду) и валидируется шаг за шагом как любой недоверенный payload.
+BACKFILL_OFFSETS = (0, 1, 2)          # сегодня / вчера / позавчера — решение владельца
+BACKFILL_MINUTES = (0, 10, 20, 30, 40, 50)
 SEVERITY_LEVELS = (1, 2, 3)
 # Длина названия лекарства — в UTF-16-единицах, как и остальные лимиты
 MED_NAME_LIMIT = 100
@@ -225,7 +232,7 @@ def card_keyboard(ep: db.Episode, lang: str) -> InlineKeyboardMarkup:
     # карточка живёт одна на эпизод и обновляется сама, человек к ней
     # ВОЗВРАЩАЕТСЯ, а значит её текст и кнопки должны помещаться на экране
     # вместе. Семь рядов под восемью строками текста на телефон не влезали.
-    if ep.is_open and ep.is_stale(config.STALE_AFTER_MIN):
+    if ep.needs_end(config.STALE_AFTER_MIN):
         # Подпись уже была правильной для той кнопки, которой притворялась;
         # раньше она висела на пустом обработчике и не делала ничего — худшее,
         # что может быть на карточке у пожилого человека.
@@ -352,7 +359,7 @@ def _report_keyboard(active: int, lang: str) -> InlineKeyboardMarkup:
     ])
 
 
-def _day_keyboard(day: date) -> InlineKeyboardMarkup:
+def _day_keyboard(day: date, lang: str) -> InlineKeyboardMarkup:
     rows = [[
         InlineKeyboardButton("⬅️ " + (day - timedelta(days=1)).strftime("%d.%m"),
                              callback_data=f"dn:{day - timedelta(days=1)}"),
@@ -362,6 +369,14 @@ def _day_keyboard(day: date) -> InlineKeyboardMarkup:
             InlineKeyboardButton((day + timedelta(days=1)).strftime("%d.%m") + " ➡️",
                                  callback_data=f"dn:{day + timedelta(days=1)}")
         )
+    offset = (report.today_local() - day).days
+    if offset in BACKFILL_OFFSETS:
+        # Сводка — правильное место входа: человек утром видит, что ночного
+        # приступа в списке нет, и кнопка рядом; день она уже знает, поэтому
+        # шаг выбора дня пропускается. Окно то же, что у /earlier: владелец
+        # решил, что глубже позавчера запись не нужна.
+        rows.append([InlineKeyboardButton(t(lang, "btn_backfill"),
+                                          callback_data=f"bf:n:{day}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -498,7 +513,10 @@ def _throttled(context: ContextTypes.DEFAULT_TYPE, key: str, seconds: float) -> 
     """
     now = db.utcnow().timestamp()
     last = context.user_data.get(f"rl:{key}")
-    if last is not None and now - last < seconds:
+    # 0 <= : после шага часов назад метка оказывается в будущем, и без нижней
+    # границы каждое действие считалось бы «слишком частым», пока время не
+    # догонит метку.
+    if last is not None and 0 <= now - last < seconds:
         return True
     context.user_data[f"rl:{key}"] = now
     return False
@@ -520,6 +538,117 @@ async def _can_add_episode(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         return False
     return True
+
+
+def _backfill_day(raw: str) -> date | None:
+    """День из payload: только ISO-дата в окне владельца (0..2 дня назад).
+
+    Дата абсолютная, а не смещением: кнопка живёт в истории чата вечно, и
+    «позавчера», нажатое через год, записывало бы не тот день. Абсолютная дата
+    либо означает ровно тот день, который кнопка показывала, либо выпала из
+    окна — и тогда отказ.
+    """
+    if len(raw) != 10 or not raw.isascii():
+        return None
+    try:
+        day = date.fromisoformat(raw)
+    except ValueError:
+        return None
+    if not 0 <= (report.today_local() - day).days <= max(BACKFILL_OFFSETS):
+        return None
+    return day
+
+
+def _bf_int(parts: list[str], index: int, allowed) -> int | None:
+    """Строгое число из bf-payload: только ASCII-цифры, без знаков и пробелов.
+
+    int() принимает «+30», « 30 », «1_5» и арабские цифры — клавиатура такого
+    не выпускает, значит это подделка, и ей положен отказ, а не терпимость.
+    """
+    raw = parts[index] if len(parts) > index else ""
+    if not raw.isascii() or not raw.isdigit():
+        return None
+    value = int(raw)
+    return value if value in allowed else None
+
+
+def _backfill_start(day: date, hour: int, minute: int) -> datetime | None:
+    """Момент начала из выбора кнопками. None, если он ещё не наступил.
+
+    Будущее отклоняется, а не подрезается: клавиатуры будущих вариантов не
+    предлагают, значит такой payload подделан или устарел за время раздумий.
+    """
+    start = datetime.combine(day, time(hour, minute), tzinfo=config.local_tz())
+    start = start.astimezone(timezone.utc)
+    if start > db.utcnow():
+        return None
+    return start
+
+
+def _backfill_day_keyboard(lang: str) -> InlineKeyboardMarkup:
+    today = report.today_local()
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(t(lang, "btn_day_today"),
+                                 callback_data=f"bf:d:{today}"),
+            InlineKeyboardButton(t(lang, "btn_day_yesterday"),
+                                 callback_data=f"bf:d:{today - timedelta(days=1)}"),
+        ],
+        [InlineKeyboardButton(t(lang, "btn_day_before"),
+                              callback_data=f"bf:d:{today - timedelta(days=2)}")],
+        [InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="bf:x")],
+    ])
+
+
+def _backfill_hour_screen(day: date, lang: str) -> tuple[str, InlineKeyboardMarkup]:
+    text = t(lang, "back_ask_hour", date=report.date_day_month(day, lang))
+    max_hour = 23
+    if day == report.today_local():
+        # Будущих часов сегодня не существует — и об этом сказано словами,
+        # иначе человек, искавший вчерашние 23:00, решит, что сломано.
+        max_hour = report.local(db.utcnow()).hour
+        text += "\n" + t(lang, "back_today_hours_note")
+    buttons = [
+        InlineKeyboardButton(f"{h:02d}", callback_data=f"bf:h:{day}:{h}")
+        for h in range(max_hour + 1)
+    ]
+    rows = [buttons[i:i + 4] for i in range(0, len(buttons), 4)]
+    rows.append([InlineKeyboardButton(t(lang, "btn_back_step"), callback_data="bf:s")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+def _backfill_minute_keyboard(day: date, hour: int, lang: str) -> InlineKeyboardMarkup:
+    # На кнопке ПОЛНОЕ время («23:40», а не «:40»): выбор самопроверяемый,
+    # человек читает готовый ответ — и подтверждающий экран не нужен.
+    buttons = [
+        InlineKeyboardButton(f"{hour:02d}:{m:02d}", callback_data=f"bf:m:{day}:{hour}:{m}")
+        for m in BACKFILL_MINUTES
+        if _backfill_start(day, hour, m) is not None
+    ]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    rows.append([InlineKeyboardButton(t(lang, "btn_back_step"),
+                                      callback_data=f"bf:d:{day}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _backfill_duration_keyboard(day: date, hour: int, minute: int,
+                                lang: str) -> InlineKeyboardMarkup:
+    start = _backfill_start(day, hour, minute)
+    now = db.utcnow()
+    # Предлагаются только длительности, чей конец уже наступил: невозможное
+    # состояние предотвращается, а не сообщается. «Не знаю» доступно всегда.
+    buttons = [
+        InlineKeyboardButton(report.human_duration(timedelta(minutes=m), lang),
+                             callback_data=f"bf:f:{day}:{hour}:{minute}:{m}")
+        for m in DURATION_CHOICES
+        if start is not None and start + timedelta(minutes=m) <= now
+    ]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    rows.append([InlineKeyboardButton(t(lang, "btn_dunno"),
+                                      callback_data=f"bf:f:{day}:{hour}:{minute}:x")])
+    rows.append([InlineKeyboardButton(t(lang, "btn_back_step"),
+                                      callback_data=f"bf:h:{day}:{hour}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _can_shift_end(ep: db.Episode) -> bool:
@@ -576,7 +705,7 @@ async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
                     text, chat_id=chat_id, message_id=ep.card_msg,
                     reply_markup=card_keyboard(ep, lang),
                 )
-                if ep.is_open:
+                if ep.is_open and not ep.end_unknown:
                     _schedule_tick(context.job_queue, ep.user_id, ep.id, chat_id)
                 return
             except Exception as exc:
@@ -606,7 +735,9 @@ async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
             reply_markup=card_keyboard(ep, lang) if index == len(chunks) - 1 else None,
         )
     db.set_card_msg(ep.user_id, ep.id, sent.message_id)
-    if ep.is_open:
+    # Эпизоду с объявленно неизвестным концом «идёт уже N минут» не рисуем —
+    # и обновлять там нечего.
+    if ep.is_open and not ep.end_unknown:
         _schedule_tick(context.job_queue, ep.user_id, ep.id, chat_id)
 
 
@@ -750,7 +881,7 @@ async def _tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     if ep is None or not ep.is_open or ep.card_msg is None:
         job.schedule_removal()
         return
-    if ep.is_stale(config.STALE_AFTER_MIN) or ep.duration() > timedelta(hours=47):
+    if ep.needs_end(config.STALE_AFTER_MIN) or ep.duration() > timedelta(hours=47):
         job.schedule_removal()
         return
     # Если открыта панель, перерисовываем ЕЁ: иначе ежеминутное обновление
@@ -888,6 +1019,17 @@ async def cmd_forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+async def cmd_earlier(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Запись приступа, который уже прошёл. Не на плашке и не рядом с «⚡️»:
+    перепутать «сейчас» со «вчера ночью» — худшая опечатка в продукте."""
+    lang = _lang(update)
+    if not await _can_add_episode(update, context, _uid(update), lang):
+        return
+    await update.message.reply_text(
+        t(lang, "back_intro"), reply_markup=_backfill_day_keyboard(lang)
+    )
+
+
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lang = _lang(update)
     pending = context.user_data.pop("await", None)
@@ -1005,7 +1147,7 @@ async def _send_day(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
     episodes = db.list_episodes(user_id, start, end)
     meds = db.list_meds(user_id, start, end)
     await _send_text(
-        context, chat_id, report.day_summary(day, episodes, meds, lang), _day_keyboard(day)
+        context, chat_id, report.day_summary(day, episodes, meds, lang), _day_keyboard(day, lang)
     )
 
 
@@ -1297,7 +1439,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 day, db.list_episodes(user_id, start, end),
                 db.list_meds(user_id, start, end), lang,
             ),
-            _day_keyboard(day),
+            _day_keyboard(day, lang),
         )
         return
     if action == "nn":  # свободный текст → новый эпизод с этой заметкой
@@ -1409,6 +1551,147 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.edit_message_text(t(lang, "med_deleted"))
         return
 
+    if action == "bf":  # ретроспективная запись: приступ, который уже прошёл
+        sub = parts[1] if len(parts) > 1 else ""
+        if sub == "x" and len(parts) == 2:
+            await ack()
+            try:
+                await query.edit_message_text(t(lang, "not_logged"))
+            except Exception:
+                pass
+            return
+        if sub == "s" and len(parts) == 2:  # назад к выбору дня
+            await ack()
+            await _edit_text(query, context, t(lang, "back_intro"),
+                             _backfill_day_keyboard(lang))
+            return
+        if sub in ("d", "n") and len(parts) == 3:  # день выбран → сетка часов
+            day = _backfill_day(parts[2])
+            if day is None:
+                await ack()
+                return
+            if not await _can_add_episode(update, context, user_id, lang):
+                await ack()
+                return
+            await ack()
+            text, keyboard = _backfill_hour_screen(day, lang)
+            if sub == "n":
+                # Вход из сводки дня: сводку не затираем — человек её читал и
+                # по ней заметил пропуск. Поток уезжает в новое сообщение.
+                await context.bot.send_message(query.message.chat_id, text,
+                                               reply_markup=keyboard)
+            else:
+                await _edit_text(query, context, text, keyboard)
+            return
+        if sub == "h" and len(parts) == 4:  # час выбран → минуты полным временем
+            day = _backfill_day(parts[2])
+            hour = _bf_int(parts, 3, range(24))
+            if day is None or hour is None:
+                await ack()
+                return
+            keyboard = _backfill_minute_keyboard(day, hour, lang)
+            if len(keyboard.inline_keyboard) == 1:
+                # Будущий час: ни одной минуты не существует. Экран-тупик из
+                # одной кнопки «Назад» хуже простого отказа.
+                await ack()
+                return
+            await ack()
+            await _edit_text(query, context, t(lang, "back_ask_minute"), keyboard)
+            return
+        if sub == "m" and len(parts) == 5:  # минута выбрана → длительность
+            day = _backfill_day(parts[2])
+            hour = _bf_int(parts, 3, range(24))
+            minute = _bf_int(parts, 4, BACKFILL_MINUTES)
+            if day is None or hour is None or minute is None:
+                await ack()
+                return
+            start = _backfill_start(day, hour, minute)
+            if start is None:
+                await ack()
+                return
+            await ack()
+            await _edit_text(
+                query, context,
+                t(lang, "back_ask_duration",
+                  date=report.date_day_month(day, lang), time=report.hhmm(start)),
+                _backfill_duration_keyboard(day, hour, minute, lang),
+            )
+            return
+        if sub == "f" and len(parts) == 6:  # длительность выбрана → создаём
+            day = _backfill_day(parts[2])
+            hour = _bf_int(parts, 3, range(24))
+            minute = _bf_int(parts, 4, BACKFILL_MINUTES)
+            if day is None or hour is None or minute is None:
+                await ack()
+                return
+            start = _backfill_start(day, hour, minute)
+            if start is None:
+                await ack()
+                return
+            # Сначала ПОЛНАЯ валидация, потом предохранители: отклонённый
+            # мусор не должен сжигать слот лимита частоты у честного нажатия.
+            duration = None
+            if parts[5] != "x":
+                duration = _bf_int(parts, 5, DURATION_CHOICES)
+                if duration is None:
+                    await ack()
+                    return
+                if start + timedelta(minutes=duration) > db.utcnow():
+                    # Клавиатура такого не предлагает: payload подделан или
+                    # устарел. Будущее окончание — выдуманные данные.
+                    await ack()
+                    return
+            existing = db.episode_at(user_id, start)
+            if existing is not None:
+                # Повтор кнопки (Telegram передоставил нажатие, или человек
+                # нажал старую из истории): эпизод с этой минуты уже есть —
+                # показываем его, а не создаём близнеца.
+                await ack()
+                try:
+                    await query.edit_message_text(t(lang, "back_duplicate"))
+                except Exception:
+                    pass
+                await _send_card(update, context, existing, lang)
+                return
+            if _throttled(context, "episode", config.MIN_ACTION_INTERVAL_SEC):
+                await ack(t(lang, "too_fast"))
+                return
+            if not await _can_add_episode(update, context, user_id, lang):
+                await ack()
+                return
+            if duration is None:
+                # Длительность неизвестна: эпизод сохраняется открытым с
+                # честной отметкой. Благодаря ей он НЕ считается текущим, не
+                # блокирует «⚡️», не ловит ввод и не тикает.
+                ep = db.start_episode(user_id, started_at=start)
+                db.mark_end_unknown(user_id, ep.id)
+                await ack()
+                try:
+                    await query.edit_message_text(
+                        t(lang, "back_saved_unknown",
+                          date=report.date_day_month(day, lang),
+                          time=report.hhmm(start)))
+                except Exception:
+                    pass
+                await _send_card(update, context, db.get_episode(user_id, ep.id), lang)
+                return
+            end = start + timedelta(minutes=duration)
+            ep = db.start_episode(user_id, started_at=start)
+            closed = db.close_episode(user_id, ep.id, ended_at=end, approx=True)
+            await ack()
+            try:
+                await query.edit_message_text(
+                    t(lang, "back_saved",
+                      date=report.date_day_month(day, lang),
+                      start=report.hhmm(start), end=report.hhmm(end),
+                      dur=report.human_duration(timedelta(minutes=duration), lang)))
+            except Exception:
+                pass
+            await _send_card(update, context, closed, lang)
+            return
+        await ack()
+        return
+
     # --- действия над эпизодом ---
     episode_id = _episode_id(parts)
     if episode_id is None:
@@ -1428,7 +1711,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # «изменилось». Но и записать «отпустило сейчас» нельзя, это была бы
     # догадка. Поэтому сразу спрашиваем длительность — это и есть следующий
     # полезный шаг, а не тупик.
-    if action in NEEDS_ACTIVE and ep.is_open and ep.is_stale(config.STALE_AFTER_MIN):
+    if action in NEEDS_ACTIVE and ep.needs_end(config.STALE_AFTER_MIN):
         await ack()
         await _edit_text(
             query, context,
@@ -1449,7 +1732,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _refresh(query, ep, lang, context)
         return
     if action in NEEDS_ACTIVE and (
-        not ep.is_open or ep.is_stale(config.STALE_AFTER_MIN)
+        not ep.is_open or ep.needs_end(config.STALE_AFTER_MIN)
     ):
         await ack(t(lang, "ep_state_changed"))
         await _refresh(query, ep, lang, context)
@@ -1820,6 +2103,7 @@ def _commands(lang: str) -> list[BotCommand]:
     return [
         BotCommand("log", t(lang, "cmd_log")),
         BotCommand("stop", t(lang, "cmd_stop")),
+        BotCommand("earlier", t(lang, "cmd_earlier")),
         BotCommand("last", t(lang, "cmd_last")),
         BotCommand("med", t(lang, "cmd_med")),
         BotCommand("today", t(lang, "cmd_today")),
@@ -1881,7 +2165,8 @@ def register_handlers(app) -> None:
         ("start", cmd_start), ("help", cmd_help), ("lang", cmd_lang),
         ("cancel", cmd_cancel), ("forget", cmd_forget),
         ("log", action_start_episode),
-        ("stop", action_end_episode), ("med", action_med), ("last", cmd_last),
+        ("stop", action_end_episode), ("earlier", cmd_earlier),
+        ("med", action_med), ("last", cmd_last),
         ("today", action_today), ("yesterday", cmd_yesterday),
         ("week", cmd_week), ("month", cmd_month), ("export", action_export),
     ):

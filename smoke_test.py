@@ -211,7 +211,7 @@ def main() -> int:
             bot._toggle_keyboard(ep, "sym", LANG),
             bot._toggle_keyboard(ep, "trg", LANG),
             bot._report_keyboard(7, LANG),
-            bot._day_keyboard(day - timedelta(days=1)),
+            bot._day_keyboard(day - timedelta(days=1), LANG),
         ):
             for row in markup.inline_keyboard:
                 payloads += [b.callback_data for b in row if b.callback_data]
@@ -387,6 +387,33 @@ def main() -> int:
         check(corrected.confirmed_at is not None,
               "сдвиг обновляет отметку активности")
         db.delete_episode(fuid, corrected.id)
+
+        # «Не знаю» и needs_end: такой эпизод нигде не должен считаться идущим.
+        inert = db.start_episode(fuid)
+        db.mark_end_unknown(fuid, inert.id)
+        inert = db.get_episode(fuid, inert.id)
+        check(inert.needs_end(60) and inert.is_open,
+              "needs_end истинен для свежего «не знаю»")
+        check(db.active_episode(fuid, 60) is None or
+              db.active_episode(fuid, 60).id != inert.id,
+              "active_episode исключает «не знаю»")
+        check("идёт" not in report.episode_card(inert, LANG),
+              "карточка «не знаю» не пишет «идёт»")
+        # Закрытие снимает отметку — противоречие «закрыт, но конец неизвестен»
+        # не должно жить в строке
+        closed_unk = db.close_episode(fuid, inert.id)
+        check(closed_unk is not None and not closed_unk.end_unknown,
+              "закрытие снимает отметку «не знаю»")
+        # «Ещё идёт» тоже снимает: раз идёт — конец не неизвестен
+        again_unk = db.start_episode(fuid)
+        db.mark_end_unknown(fuid, again_unk.id)
+        resumed = db.confirm_still_on(fuid, again_unk.id)
+        check(resumed is not None and not resumed.end_unknown,
+              "«ещё идёт» снимает отметку «не знаю»")
+        check(db.episode_at(fuid, resumed.started_at) is not None and
+              db.episode_at(fuid, db.utcnow() - timedelta(days=300)) is None,
+              "episode_at находит эпизод по минуте старта и не выдумывает")
+        db.delete_episode(fuid, inert.id); db.delete_episode(fuid, again_unk.id)
 
         # Правка времени окончания: задержка у конца систематическая — человек
         # жмёт «отпустило» не когда полегчало, а когда вспомнил, и всегда

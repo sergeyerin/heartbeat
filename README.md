@@ -110,6 +110,16 @@ more than `RECENT_EPISODE_MIN` minutes ago (3 hours by default).
   Excel and Google Sheets open it without encoding games). Handy to hand to a
   cardiologist.
 
+## Logging an episode after the fact
+
+An attack at night with the phone in another room still belongs in the diary.
+`/earlier` — or the «➕ Episode on this day» button under a day's summary —
+records it: pick the day (today, yesterday, or the day before), the hour, the
+minute (buttons show the full time, like `23:40`), and roughly how long it
+lasted. No typing anywhere. The entry is honestly marked as approximate, and
+«don't know» keeps the episode with its duration unknown rather than inventing
+one. A currently running episode is never disturbed.
+
 ## Where it happened
 
 The «📍 Place» button on the bottom keyboard attaches your location to the
