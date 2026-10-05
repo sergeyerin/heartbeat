@@ -931,19 +931,34 @@ async def _tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Эпизод забыт или слишком стар — обновлять больше нечего, кадр был последним.
     if ep.needs_end(config.STALE_AFTER_MIN) or ep.duration() > timedelta(hours=47):
         job.schedule_removal()
+        if ep.is_stale(config.STALE_AFTER_MIN):
+            # Тик расклеил карточку сам (без напоминания) — значит он же и
+            # возвращает плашку, один раз.
+            await _notify_stale_once(context.bot, user_id,
+                                     db.get_episode(user_id, ep.id), lang)
 
 
-async def _restore_plate(bot_obj, user_id: int, lang: str) -> None:
-    """Вернуть нижнее меню к «⚡️ Аритмия» после того, как эпизод стал забытым.
+async def _notify_stale_once(bot_obj, user_id: int, ep: db.Episode,
+                            lang: str) -> None:
+    """Один раз при переходе эпизода в «забыт» вернуть нижнее меню.
 
     Карточка правится на месте (инлайн), а reply-клавиатура меняется только с
     новым сообщением — поэтому плашку обновляем отдельной короткой репликой.
-    `has_open` по _active: забытый эпизод активным не считается.
+    Но ТОЛЬКО если:
+    - это ещё не показывали (`stale_shown`): иначе сообщение прилетало на каждом
+      рестарте, а пользователь редеплоил много раз;
+    - СЕЙЧАС нет активного эпизода: если он есть, плашка и так верная
+      («✅ Отпустило»), а текст «начнётся снова — жмите Аритмия» ей противоречит.
     """
+    if ep.stale_shown:
+        return
+    db.mark_stale_shown(user_id, ep.id)
+    if _active(user_id) is not None:
+        return
     await bot_obj.send_message(
         user_id,
         t(lang, "plate_after_stale", btn_start=t(lang, "btn_start")),
-        reply_markup=main_keyboard(_active(user_id) is not None, lang),
+        reply_markup=main_keyboard(False, lang),
     )
 
 
@@ -1001,8 +1016,9 @@ async def _remind(context: ContextTypes.DEFAULT_TYPE) -> None:
                 reply_markup=card_keyboard(ep, lang),
             )
             db.set_card_msg(user_id, ep.id, sent.message_id)
-        # И возвращаем нижнее меню: эпизод больше не активен.
-        await _restore_plate(context.bot, user_id, lang)
+        # И один раз возвращаем нижнее меню (если активного эпизода нет).
+        await _notify_stale_once(context.bot, user_id,
+                                 db.get_episode(user_id, ep.id), lang)
         return
 
     # Окно: это и есть уведомление. Старую карточку удаляем, вопрос приходит
@@ -2251,7 +2267,6 @@ async def post_init(app) -> None:
         # замороженной на «идёт, уже N мин». Один раз догоняем: правим в
         # стальную форму. Это и расклеивает карточку, зависшую у пользователя.
         caught = 0
-        plated: set[int] = set()
         for ep in db.stale_cards_to_refresh(config.STALE_AFTER_MIN):
             ep_lang = _job_lang(ep.user_id)
             try:
@@ -2261,26 +2276,18 @@ async def post_init(app) -> None:
                     reply_markup=card_keyboard(ep, ep_lang),
                 )
                 caught += 1
-                # Плашку возвращаем по одному разу на пользователя: карточка
-                # обновилась на месте, а нижнее меню после редеплоя осталось на
-                # «✅ Отпустило». Это и есть «не появилось меню снизу».
-                if ep.user_id not in plated:
-                    try:
-                        await app.bot.send_message(
-                            ep.user_id,
-                            t(ep_lang, "plate_after_stale",
-                              btn_start=t(ep_lang, "btn_start")),
-                            reply_markup=main_keyboard(
-                                _active(ep.user_id) is not None, ep_lang),
-                        )
-                        plated.add(ep.user_id)
-                    except Exception:
-                        pass
             except Exception:
                 pass  # сообщение удалено, слишком старое или уже стальное
+            # Плашку — один раз на эпизод (флаг в БД) и только если активного
+            # нет. Раньше это слалось на КАЖДОМ рестарте и даже при активном
+            # эпизоде, где текст «начнётся снова» противоречил плашке.
+            try:
+                await _notify_stale_once(app.bot, ep.user_id,
+                                         db.get_episode(ep.user_id, ep.id), ep_lang)
+            except Exception:
+                pass
         if caught:
-            log.info("Расклеено забытых карточек: %s, плашек восстановлено: %s",
-                     caught, len(plated))
+            log.info("Расклеено забытых карточек: %s", caught)
 
     # Описания команд — на каждом языке плюс дефолтный набор для остальных.
     for lang in i18n.SUPPORTED:

@@ -1434,7 +1434,34 @@ async def run() -> None:
     check(plate_sent, "post_init прислал сообщение с нижним меню")
     check(plate_sent[-1].keyboard[0][0].text == t(LANG, "btn_start"),
           "и меню вернулось к «Аритмия» — эпизод больше не активен")
+    check(db.get_episode(uid, frozen.id).stale_shown,
+          "переход в «забыт» отмечен показанным")
+    # Второй рестарт НЕ должен снова слать плашку (жалоба: сообщение на каждом
+    # редеплое).
+    fake.markups.clear()
+    await bot.post_init(SimpleNamespace(bot=fake, job_queue=JQ))
+    check(not [m for m in fake.markups if m and hasattr(m, "keyboard")],
+          "на втором рестарте плашка повторно НЕ приходит")
     db.delete_episode(uid, frozen.id)
+
+    # 19p2. Плашка НЕ приходит, если сейчас есть активный эпизод: там плашка и
+    # так верная, а текст «начнётся снова» ей противоречит. (Жалоба: сообщение
+    # при активном эпизоде.)
+    live_now = db.start_episode(uid)  # активный
+    ln = (await make_bot_message(fake, uid, "идёт")).message_id
+    db.set_card_msg(uid, live_now.id, ln)
+    stale_too = db.start_episode(uid, started_at=db.utcnow() - timedelta(minutes=200))
+    stm = (await make_bot_message(fake, uid, "идёт")).message_id
+    db.set_card_msg(uid, stale_too.id, stm)
+    check(db.active_episode(uid, cfg.STALE_AFTER_MIN) is not None, "активный эпизод есть")
+    fake.markups.clear()
+    await bot.post_init(SimpleNamespace(bot=fake, job_queue=JQ))
+    check(not [m for m in fake.markups if m and hasattr(m, "keyboard")],
+          "при активном эпизоде плашка-сообщение не приходит")
+    check(db.get_episode(uid, stale_too.id).stale_shown,
+          "но карточка забытого всё равно расклеена (флаг стоит)")
+    await press(f"e:{live_now.id}")
+    db.delete_episode(uid, live_now.id); db.delete_episode(uid, stale_too.id)
 
     # 19q. /cancel не оставляет «Отменил ввод.» висеть последним: пока идёт
     # эпизод, последней в чате должна быть его карточка (превью в списке чатов).

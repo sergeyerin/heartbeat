@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     lon        REAL,
     card_msg   INTEGER,                    -- id сообщения с живой карточкой
     remind_stage INTEGER NOT NULL DEFAULT 0, -- 0 = не спрашивали, 1 = уже спросили
+    stale_shown INTEGER NOT NULL DEFAULT 0, -- 1 = переход в «забыт» уже показан
     confirmed_at TEXT,                    -- когда последний раз сказали «ещё идёт»
     severity   INTEGER,                   -- 1 терпимо / 2 средне / 3 тяжело
     pulse      INTEGER,
@@ -96,6 +97,7 @@ class Episode:
     lon: float | None = None
     card_msg: int | None = None
     remind_stage: int = 0
+    stale_shown: bool = False
     confirmed_at: datetime | None = None
 
     @property
@@ -191,6 +193,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE episodes ADD COLUMN remind_stage INTEGER NOT NULL DEFAULT 0"
         )
+    if "stale_shown" not in columns:
+        conn.execute(
+            "ALTER TABLE episodes ADD COLUMN stale_shown INTEGER NOT NULL DEFAULT 0"
+        )
 
 
 def _db() -> sqlite3.Connection:
@@ -216,6 +222,7 @@ def _row_to_episode(row: sqlite3.Row) -> Episode:
         lon=row["lon"],
         card_msg=row["card_msg"],
         remind_stage=row["remind_stage"],
+        stale_shown=bool(row["stale_shown"]),
         confirmed_at=_parse(row["confirmed_at"]),
     )
 
@@ -335,7 +342,8 @@ def stale_cards_to_refresh(stale_after_min: int, limit: int = 500) -> list[Episo
         _row_to_episode(r)
         for r in _db().execute(
             "SELECT * FROM episodes WHERE ended_at IS NULL AND end_unknown = 0 "
-            "AND card_msg IS NOT NULL AND COALESCE(confirmed_at, started_at) <= ? "
+            "AND card_msg IS NOT NULL AND stale_shown = 0 "
+            "AND COALESCE(confirmed_at, started_at) <= ? "
             "ORDER BY started_at DESC LIMIT ?",
             (cutoff, limit),
         ).fetchall()
@@ -351,7 +359,7 @@ def confirm_still_on(user_id: int, episode_id: int) -> Episode | None:
     cur = _db().execute(
         # «Ещё идёт» снимает и «не знаю»: раз идёт — конец не неизвестен,
         # его просто ещё нет.
-        "UPDATE episodes SET confirmed_at = ?, end_unknown = 0 "
+        "UPDATE episodes SET confirmed_at = ?, end_unknown = 0, stale_shown = 0 "
         "WHERE id = ? AND user_id = ? AND ended_at IS NULL",
         (_iso(utcnow()), episode_id, user_id),
     )
@@ -401,7 +409,7 @@ def reopen_episode(user_id: int, episode_id: int) -> Episode | None:
     """Возвращает ЗАКРЫТЫЙ эпизод в работу. None, если он и так открыт."""
     cur = _db().execute(
         "UPDATE episodes SET ended_at = NULL, end_approx = 0, end_unknown = 0, "
-        "remind_stage = 0, confirmed_at = ? "
+        "remind_stage = 0, stale_shown = 0, confirmed_at = ? "
         "WHERE id = ? AND user_id = ? AND ended_at IS NOT NULL",
         (_iso(utcnow()), episode_id, user_id),
     )
@@ -508,6 +516,16 @@ def append_note_dropping_oldest(
     )
     _db().commit()
     return get_episode(user_id, episode_id), dropped
+
+
+def mark_stale_shown(user_id: int, episode_id: int) -> None:
+    """Отметить, что переход эпизода в «забыт» уже показан пользователю —
+    чтобы не слать плашку-сообщение на каждом рестарте."""
+    _db().execute(
+        "UPDATE episodes SET stale_shown = 1 WHERE id = ? AND user_id = ?",
+        (episode_id, user_id),
+    )
+    _db().commit()
 
 
 def set_remind_stage(user_id: int, episode_id: int, stage: int) -> None:
