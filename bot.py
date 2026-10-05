@@ -428,7 +428,9 @@ async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
     записью и отправкой — тогда отправлять нечего."""
     if ep is None:
         return
-    text = (header + "\n\n" if header else "") + report.episode_card(ep, lang)
+    files = db.count_attachments(ep.user_id, ep.id)
+    text = ((header + "\n\n" if header else "")
+            + report.episode_card(ep, lang, attachments=files))
     await _send_text(context, update.effective_chat.id, text, card_keyboard(ep, lang))
 
 
@@ -441,9 +443,11 @@ async def _refresh(query, ep: db.Episode | None, lang: str,
     """
     if ep is None:
         return
+    files = db.count_attachments(ep.user_id, ep.id)
     try:
         await query.edit_message_text(
-            report.episode_card(ep, lang), reply_markup=card_keyboard(ep, lang)
+            report.episode_card(ep, lang, attachments=files),
+            reply_markup=card_keyboard(ep, lang),
         )
     except Exception as exc:
         if "not modified" in str(exc):
@@ -454,7 +458,8 @@ async def _refresh(query, ep: db.Episode | None, lang: str,
         # человек остался бы с неработающей кнопкой и без объяснений.
         if context is not None:
             await _send_text(context, query.message.chat_id,
-                             report.episode_card(ep, lang), card_keyboard(ep, lang))
+                             report.episode_card(ep, lang, attachments=files),
+                             card_keyboard(ep, lang))
 
 
 def _job_name(user_id: int, episode_id: int) -> str:
@@ -688,7 +693,9 @@ async def _send_day(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
     episodes = db.list_episodes(user_id, start, end)
     meds = db.list_meds(user_id, start, end)
     await _send_text(
-        context, chat_id, report.day_summary(day, episodes, meds, lang), _day_keyboard(day)
+        context, chat_id,
+        report.day_summary(day, episodes, meds, lang, db.attachment_counts(user_id)),
+        _day_keyboard(day),
     )
 
 
@@ -729,7 +736,8 @@ async def _send_csv(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TY
     if not episodes:
         await context.bot.send_message(chat_id, t(lang, "nothing_to_export"))
         return
-    data = report.episodes_csv(episodes, db.all_meds(user_id), lang)
+    data = report.episodes_csv(episodes, db.all_meds(user_id), lang,
+                               db.attachment_counts(user_id))
     name = f"heartbeat_{report.today_local().strftime('%Y-%m-%d')}.csv"
     await context.bot.send_document(
         chat_id,
@@ -847,6 +855,53 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                      _note_header(lang, status, t(lang, "note_appended", id=ep.id)))
 
 
+async def on_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Фото или документ — вложение к эпизоду.
+
+    Намеренно принимаем что угодно: фото ленты ЭКГ из поликлиники, PDF холтера,
+    экран тонометра, скриншот графика пульса с часов, выписку. До этого
+    присланный файл не попадал ни в один хендлер, человек получал молчание и
+    делал вывод, что бот сломан.
+    """
+    user_id = _uid(update)
+    lang = _lang(update)
+    message = update.message
+    if message.photo:
+        file_id, kind, name = message.photo[-1].file_id, "photo", None
+    elif message.document:
+        file_id = message.document.file_id
+        kind, name = "document", message.document.file_name
+    else:
+        return
+
+    ep = _current_episode(user_id)
+    if ep is None:
+        context.user_data["pending_file"] = (file_id, kind, name)
+        await message.reply_text(
+            t(lang, "file_needs_episode"),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(t(lang, "btn_log_with_file"), callback_data="nf")
+            ]]),
+        )
+        return
+    await _attach(update, context, ep, lang, file_id, kind, name)
+
+
+async def _attach(update: Update, context: ContextTypes.DEFAULT_TYPE, ep: db.Episode,
+                  lang: str, file_id: str, kind: str, name: str | None) -> None:
+    saved = db.add_attachment(ep.user_id, ep.id, file_id, kind, name)
+    if saved is None:
+        await context.bot.send_message(
+            update.effective_chat.id,
+            t(lang, "file_too_many", n=db.MAX_ATTACHMENTS_PER_EPISODE),
+        )
+        return
+    await _send_card(
+        update, context, db.get_episode(ep.user_id, ep.id), lang,
+        t(lang, "file_saved", id=ep.id, n=db.count_attachments(ep.user_id, ep.id)),
+    )
+
+
 # --- inline-кнопки ---------------------------------------------------------
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -914,6 +969,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             report.day_summary(
                 day, db.list_episodes(user_id, start, end),
                 db.list_meds(user_id, start, end), lang,
+                db.attachment_counts(user_id),
             ),
             _day_keyboard(day),
         )
@@ -954,6 +1010,19 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         await _send_card(update, context, ep, lang)
         _schedule_reminder(context.job_queue, user_id, ep.id, config.EPISODE_WINDOW_MIN)
+        return
+    if action == "nf":  # файл прислали, когда эпизода не было
+        await ack()
+        pending = context.user_data.pop("pending_file", None)
+        if not pending:
+            await query.edit_message_text(t(lang, "file_lost"))
+            return
+        ep = _active(user_id) or db.start_episode(user_id)
+        if _active(user_id) is None:
+            _schedule_reminder(context.job_queue, user_id, ep.id,
+                               config.EPISODE_WINDOW_MIN)
+        await query.edit_message_text(t(lang, "ep_recorded", id=ep.id))
+        await _attach(update, context, ep, lang, *pending)
         return
     if action == "nx":  # «Нет» / «Отмена» — снимает и ожидание ввода
         await ack()
@@ -1421,6 +1490,10 @@ def register_handlers(app) -> None:
         on_menu_button,
     ))
     app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.ALL) & PRIVATE & filters.UpdateType.MESSAGE,
+        on_file,
+    ))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & PRIVATE & filters.UpdateType.MESSAGE, on_text
     ))

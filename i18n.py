@@ -32,10 +32,10 @@ WEEKDAYS = {
 CSV_HEADER = {
     "ru": ["тип", "id", "дата", "начало", "конец", "длительность_мин",
            "длительность_примерная", "тяжесть", "пульс", "симптомы",
-           "перед_эпизодом", "заметка"],
+           "перед_эпизодом", "заметка", "вложений"],
     "en": ["type", "id", "date", "start", "end", "duration_min",
            "duration_approx", "severity", "pulse", "symptoms",
-           "before_episode", "note"],
+           "before_episode", "note", "attachments"],
 }
 
 STRINGS: dict[str, dict[str, str]] = {
@@ -329,6 +329,27 @@ STRINGS: dict[str, dict[str, str]] = {
     },
 
     # --- экспорт ---
+    # Вложения: намеренно НЕ «пришлите ЭКГ». ЭКГ есть не у всех и не с часов,
+    # а полезны и фото ленты из поликлиники, и PDF холтера, и экран тонометра,
+    # и выписка, и скриншот графика пульса.
+    "file_saved": {"ru": "📎 Приложил к эпизоду #{id} (всего вложений: {n}).",
+                   "en": "📎 Attached to episode #{id} ({n} in total)."},
+    "file_needs_episode": {
+        "ru": "Это к какому эпизоду? Файл сохраню, как только будет к чему "
+              "привязать — отметьте эпизод кнопкой ниже.",
+        "en": "Which episode is this for? I'll keep the file as soon as there is "
+              "something to attach it to — log an episode with the button below.",
+    },
+    "btn_log_with_file": {"ru": "⚡️ Записать эпизод и приложить",
+                          "en": "⚡️ Log an episode and attach"},
+    "file_lost": {"ru": "Файл уже не у меня — пришлите его снова.",
+                  "en": "I no longer have that file — please send it again."},
+    "file_too_many": {"ru": "К одному эпизоду уже приложено {n} файлов — больше не "
+                            "добавляю, иначе карточка станет нечитаемой.",
+                      "en": "This episode already has {n} files — I'm not adding more, "
+                            "the card would become unreadable."},
+    "card_files": {"ru": "Вложения: {n}", "en": "Attachments: {n}"},
+    "line_files": {"ru": "    📎 вложений: {n}", "en": "    📎 attachments: {n}"},
     "nothing_to_export": {"ru": "Пока нечего выгружать — записей нет.",
                           "en": "Nothing to export yet — no records.",
 },

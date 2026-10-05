@@ -46,6 +46,21 @@ CREATE TABLE IF NOT EXISTS meds (
 )
 """
 
+# Вложения к эпизоду: фото ленты ЭКГ, PDF холтера, экран тонометра, выписка.
+# Храним только file_id — байты остаются у Telegram, их не надо ни качать, ни
+# бэкапить. Привязка к эпизоду: врачу важно, что трасса снята именно тогда.
+_CREATE_ATTACHMENTS = """
+CREATE TABLE IF NOT EXISTS attachments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    episode_id INTEGER NOT NULL,
+    file_id    TEXT    NOT NULL,
+    kind       TEXT    NOT NULL,          -- photo | document
+    file_name  TEXT,
+    added_at   TEXT    NOT NULL           -- UTC ISO
+)
+"""
+
 # Выбор языка командой /lang. Нужен именно в БД, а не в user_data: напоминания
 # шлёт job без апдейта, профиля Telegram там нет, а рестарт обнуляет память.
 _CREATE_PREFS = """
@@ -58,6 +73,7 @@ CREATE TABLE IF NOT EXISTS user_prefs (
 _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_episodes_user_time ON episodes(user_id, started_at)",
     "CREATE INDEX IF NOT EXISTS idx_meds_user_time ON meds(user_id, taken_at)",
+    "CREATE INDEX IF NOT EXISTS idx_att_episode ON attachments(user_id, episode_id)",
 )
 
 # Лимиты заметки — в UTF-16-единицах, как их считает Telegram (см.
@@ -107,6 +123,16 @@ class Episode:
 
 
 @dataclass
+class Attachment:
+    id: int
+    episode_id: int
+    file_id: str
+    kind: str
+    file_name: str | None
+    added_at: datetime
+
+
+@dataclass
 class Med:
     id: int
     user_id: int
@@ -145,6 +171,7 @@ def init(path: str) -> None:
     _conn.execute(_CREATE_EPISODES)
     _conn.execute(_CREATE_MEDS)
     _conn.execute(_CREATE_PREFS)
+    _conn.execute(_CREATE_ATTACHMENTS)
     _migrate(_conn)
     for stmt in _INDEXES:
         _conn.execute(stmt)
@@ -476,6 +503,10 @@ def shift_start(user_id: int, episode_id: int, minutes: int) -> Episode | None:
 
 
 def delete_episode(user_id: int, episode_id: int) -> bool:
+    _db().execute(
+        "DELETE FROM attachments WHERE episode_id = ? AND user_id = ?",
+        (episode_id, user_id),
+    )
     cur = _db().execute(
         "DELETE FROM episodes WHERE id = ? AND user_id = ?", (episode_id, user_id)
     )
@@ -508,6 +539,61 @@ def count_episodes(user_id: int) -> int:
     return _db().execute(
         "SELECT COUNT(*) FROM episodes WHERE user_id = ?", (user_id,)
     ).fetchone()[0]
+
+
+# --- вложения ---
+
+MAX_ATTACHMENTS_PER_EPISODE = 20
+
+
+def add_attachment(user_id: int, episode_id: int, file_id: str, kind: str,
+                   file_name: str | None = None) -> Attachment | None:
+    """Привязывает файл к своему эпизоду. None, если эпизода нет или их уже много."""
+    if get_episode(user_id, episode_id) is None:
+        return None
+    if count_attachments(user_id, episode_id) >= MAX_ATTACHMENTS_PER_EPISODE:
+        return None
+    now = utcnow()
+    cur = _db().execute(
+        "INSERT INTO attachments (user_id, episode_id, file_id, kind, file_name, "
+        "added_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, episode_id, file_id, kind, file_name, _iso(now)),
+    )
+    _db().commit()
+    return Attachment(id=cur.lastrowid, episode_id=episode_id, file_id=file_id,
+                      kind=kind, file_name=file_name, added_at=now)
+
+
+def count_attachments(user_id: int, episode_id: int) -> int:
+    return _db().execute(
+        "SELECT COUNT(*) FROM attachments WHERE user_id = ? AND episode_id = ?",
+        (user_id, episode_id),
+    ).fetchone()[0]
+
+
+def list_attachments(user_id: int, episode_id: int) -> list[Attachment]:
+    return [
+        Attachment(id=r["id"], episode_id=r["episode_id"], file_id=r["file_id"],
+                   kind=r["kind"], file_name=r["file_name"],
+                   added_at=_parse(r["added_at"]))
+        for r in _db().execute(
+            "SELECT * FROM attachments WHERE user_id = ? AND episode_id = ? "
+            "ORDER BY added_at ASC, id ASC",
+            (user_id, episode_id),
+        ).fetchall()
+    ]
+
+
+def attachment_counts(user_id: int) -> dict[int, int]:
+    """Сколько вложений у каждого эпизода — одним запросом, для сводок."""
+    return {
+        r["episode_id"]: r["n"]
+        for r in _db().execute(
+            "SELECT episode_id, COUNT(*) AS n FROM attachments WHERE user_id = ? "
+            "GROUP BY episode_id",
+            (user_id,),
+        ).fetchall()
+    }
 
 
 # --- настройки пользователя ---
