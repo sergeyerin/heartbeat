@@ -1535,13 +1535,21 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             context.user_data.pop(f"medpanel:{target_id}", None)
             med = db.get_med(user_id, target_id)
             if med is None:
-                await update.message.reply_text(t(lang, "med_list_stale"))
+                await update.message.reply_text(
+                    t(lang, "med_list_stale"),
+                    reply_markup=main_keyboard(_active(user_id) is not None, lang))
                 return
             name = i18n.trim_utf16(text.strip(), MED_NAME_LIMIT)
             if name:  # пустое имя не затирает уже заданное и не рисует
                 db.set_med_name(user_id, target_id, name)  # «названную» раскладку
-            await _send_med_card(update, context, db.get_med(user_id, target_id),
-                                 lang, force_new=True)
+            med = db.get_med(user_id, target_id)
+            await _send_med_card(update, context, med, lang, force_new=True)
+            # Ввод текста прячет нижнюю плашку за системной клавиатурой, а
+            # инлайн-карточка её не возвращает — поэтому плашку досылаем
+            # последним сообщением (как у эпизода после ввода пульса/заметки).
+            await update.message.reply_text(
+                t(lang, "med_saved", name=med.name or t(lang, "med_unnamed")),
+                reply_markup=main_keyboard(_active(user_id) is not None, lang))
             return
 
     ep = _current_episode(user_id)
@@ -2463,12 +2471,12 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _commands(lang: str) -> list[BotCommand]:
     return [
-        BotCommand("log", t(lang, "cmd_log")),
-        BotCommand("stop", t(lang, "cmd_stop")),
+        # Команды, дублирующие нижнюю плашку (⚡️ log/stop, 💊 med,
+        # «Сегодня» today), из меню убраны — они засоряют и список
+        # команд, и чат. Хендлеры остаются рабочими (мышечная память,
+        # подсказки), просто не рекламируются, как и /cancel.
         BotCommand("earlier", t(lang, "cmd_earlier")),
         BotCommand("last", t(lang, "cmd_last")),
-        BotCommand("med", t(lang, "cmd_med")),
-        BotCommand("today", t(lang, "cmd_today")),
         BotCommand("yesterday", t(lang, "cmd_yesterday")),
         BotCommand("week", t(lang, "cmd_week")),
         BotCommand("month", t(lang, "cmd_month")),

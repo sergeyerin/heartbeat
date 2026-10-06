@@ -1498,6 +1498,11 @@ async def run() -> None:
     # /cancel нет в меню команд — редкая и путает
     check("cancel" not in [c.command for c in bot._commands(LANG)],
           "/cancel убрана из списка команд")
+    menu_cmds = [c.command for c in bot._commands(LANG)]
+    for dup in ("log", "stop", "med", "today"):
+        check(dup not in menu_cmds, f"/{dup} убрана из меню — дублирует плашку")
+    for keep in ("earlier", "export", "forget"):
+        check(keep in menu_cmds, f"/{keep} остаётся в меню")
 
     # 19s. Карточка приёма лекарства: живой счётчик «принято N назад»,
     # сетка «когда» с шагом 15 минут, дефолт названия, удаление с токеном.
@@ -1685,12 +1690,16 @@ async def run() -> None:
     await press(f"mc:name:{typed.id}")
     check(ud.get("await") == {"what": "med", "id": typed.id},
           "панель «Что приняли?» переводит бота в ожидание названия")
+    fake.markups.clear()  # чтобы плашку считать именно из ответа на ввод
     await tap("Валерьянка")  # печатаем, НЕ нажимая «✏️ Другое»
     check(db.get_med(uid, typed.id).name == "Валерьянка",
           "набранный у «Что приняли?» текст становится названием")
     check(db.count_episodes(uid) == eps_before, "и не создаёт новый эпизод")
     check(not any(t(LANG, "ask_text_as_episode") in m for m in fake.sent),
           "и не предлагает «записать как новый эпизод»")
+    plate_type = type(bot.main_keyboard(True, LANG))
+    check(any(isinstance(m, plate_type) for m in fake.markups),
+          "после ввода названия нижняя плашка возвращается")
 
     # выбор из списка тоже снимает ожидание — иначе следующий текст стал бы
     # названием вместо заметки
