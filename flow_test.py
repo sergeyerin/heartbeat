@@ -1725,6 +1725,56 @@ async def run() -> None:
     check(not now2.startswith("● "), "у приёма с примерным временем «только что» не помечено")
     db.delete_med(uid, typed.id); db.delete_med(uid, fresh.id)
 
+    # 19v. Плоская карточка: сдвиги времени и названия (до 3) стоят ПРЯМО на
+    # ней — без захода в подменю; снимок названий строится вместе с кнопками.
+    flatm = db.add_med(uid, None, db.utcnow())
+    ud.pop(f"medopts:{flatm.id}", None)
+    kb = bot._med_card_markup(ctx, db.get_med(uid, flatm.id), LANG)
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+    check(f"mc:set:{flatm.id}:0" in cbs and f"mc:set:{flatm.id}:120" in cbs,
+          "сдвиги времени стоят прямо на карточке")
+    check(f"mc:when:{flatm.id}" not in cbs and f"mc:name:{flatm.id}" not in cbs,
+          "на новой карточке нет кнопок-подменю «Когда»/«Название»")
+    picks = [c for c in cbs if c.startswith(f"mc:pick:{flatm.id}:")]
+    check(1 <= len(picks) <= 3, f"названий на карточке не больше 3 (их {len(picks)})")
+    check(len(ud.get(f"medopts:{flatm.id}") or []) == len(picks),
+          "снимок названий совпадает с показанными кнопками")
+    check(f"mc:type:{flatm.id}" in cbs, "есть кнопка ручного ввода названия")
+    snap0 = (ud.get(f"medopts:{flatm.id}") or [None])[0]
+    await bot.on_callback(callback_update(fake, f"mc:pick:{flatm.id}:0"), ctx)
+    check(db.get_med(uid, flatm.id).name == snap0, "тап по названию на карточке ставит его")
+    bot._cancel_med_tick(JQ, uid, flatm.id)
+    db.delete_med(uid, flatm.id)
+    other = 770077
+    oh = db.add_med(other, None, db.utcnow())
+    kb2 = bot._med_card_markup(make_context(fake, {}), db.get_med(other, oh.id), LANG)
+    cbs2 = [b.callback_data for row in kb2.inline_keyboard for b in row]
+    check(not any(c.startswith("mc:pick:") for c in cbs2), "без истории кнопок названий нет")
+    check(f"mc:type:{oh.id}" in cbs2, "без истории — только кнопка ввести название")
+    db.delete_med(other, oh.id)
+
+    # 19w. Повторный приём того же лекарства гасит счётчик прежней карточки;
+    # совпадение терпимо к регистру и опечатке, но не склеивает разные.
+    check(bot._med_names_match("Конкор", "конкор"), "регистр не мешает совпадению")
+    check(bot._med_names_match("конкор", "конкро"), "перестановка букв — то же лекарство")
+    check(bot._med_names_match("конкор", "конкол"), "одна опечатка — то же лекарство")
+    check(not bot._med_names_match("конкор", "аспирин"), "разные лекарства не совпадают")
+    check(not bot._med_names_match("мг", "мл"), "слишком короткие по опечатке не склеиваем")
+    check(not bot._med_names_match("", "конкор"), "пустое имя ни с чем не совпадает")
+    oldc = db.add_med(uid, "Конкор", db.utcnow() - timedelta(minutes=20))
+    db.set_med_card_msg(uid, oldc.id, 4242)
+    bot._schedule_med_tick(JQ, uid, oldc.id, uid)
+    newc = db.add_med(uid, "конкро", db.utcnow())  # опечатка того же лекарства
+    db.set_med_card_msg(uid, newc.id, 4243)
+    bot._schedule_med_tick(JQ, uid, newc.id, uid)
+    bot._retire_same_name(ctx, uid, db.get_med(uid, newc.id))
+    check(db.get_med(uid, oldc.id).card_msg is None, "счётчик прежней карточки погашен")
+    check(f"mtick:{uid}:{oldc.id}" not in JQ.store, "тик прежней карточки снят")
+    check(db.get_med(uid, newc.id).card_msg is not None, "новая карточка продолжает считать")
+    check(db.get_med(uid, oldc.id) is not None, "запись о прежнем приёме сохранена")
+    bot._cancel_med_tick(JQ, uid, newc.id)
+    db.delete_med(uid, oldc.id); db.delete_med(uid, newc.id)
+
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять
     if db.last_episode(uid) is None:

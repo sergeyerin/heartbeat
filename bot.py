@@ -67,6 +67,7 @@ END_SHIFT_CHOICES = (15, 30, 60)
 # следующий раз»), крупнее дальше. «только что» = точное время, остальное —
 # примерно.
 MED_WHEN_OFFSETS = (0, 15, 30, 45, 60, 90, 120, 180, 240, 360)
+MED_NAME_BUTTONS = 3  # сколько недавних названий показываем прямо на карточке
 
 # Ретроспективная запись. Состояние потока живёт в payload кнопки, а не в
 # user_data: `bf:f:2:23:40:30` — 15 байт из 64 доступных, переживает рестарт,
@@ -865,30 +866,13 @@ def _schedule_reminder(job_queue, user_id: int, episode_id: int,
     )
 
 
-def _med_card_keyboard(med: db.Med, lang: str) -> InlineKeyboardMarkup:
-    if med.name is None:
-        # Название ещё не задано — предлагаем его сразу на карточке.
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton(t(lang, "btn_med_name"), callback_data=f"mc:name:{med.id}")],
-            [
-                InlineKeyboardButton(t(lang, "btn_med_when"), callback_data=f"mc:when:{med.id}"),
-                InlineKeyboardButton(t(lang, "btn_delete"), callback_data=f"mc:del:{med.id}"),
-            ],
-        ])
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(t(lang, "btn_med_when"), callback_data=f"mc:when:{med.id}"),
-            InlineKeyboardButton(t(lang, "btn_med_name"), callback_data=f"mc:name:{med.id}"),
-        ],
-        [InlineKeyboardButton(t(lang, "btn_delete"), callback_data=f"mc:del:{med.id}")],
-    ])
-
-
-def _med_when_keyboard(med: db.Med, lang: str) -> InlineKeyboardMarkup:
-    buttons = []
-    # «только что» = точное время (approx=0) — именно его ставит свежая карточка,
-    # поэтому по умолчанию отмечаем его «● » (точка = выбранное, как у тяжести).
+def _med_offset_buttons(med: db.Med, lang: str) -> list[InlineKeyboardButton]:
+    """Кнопки сдвига времени приёма. «только что» = точное время (approx=0),
+    поэтому у свежей карточки оно помечено «● » (точка = выбранное, как у тяжести);
+    при примерном времени не помечено ничего — какое смещение выбирали, из
+    уехавшего «сейчас» уже не восстановить."""
     now_selected = not med.approx
+    out = []
     for m in MED_WHEN_OFFSETS:
         if m == 0:
             label = t(lang, "btn_med_now")
@@ -897,8 +881,48 @@ def _med_when_keyboard(med: db.Med, lang: str) -> InlineKeyboardMarkup:
         else:
             label = t(lang, "btn_med_ago",
                       dur=report.human_duration(timedelta(minutes=m), lang))
-        buttons.append(InlineKeyboardButton(label, callback_data=f"mc:set:{med.id}:{m}"))
-    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+        out.append(InlineKeyboardButton(label, callback_data=f"mc:set:{med.id}:{m}"))
+    return out
+
+
+def _med_card_keyboard(med: db.Med, lang: str, names: "list[str] | tuple" = ()
+                       ) -> InlineKeyboardMarkup:
+    """Карточка приёма: сдвиги времени и недавние названия стоят ПРЯМО на ней —
+    без захода в подменю. `names` — снимок недавних названий (его индексы адресует
+    `mc:pick`); сохранить снимок обязан вызывающий (`_med_card_markup`)."""
+    offs = _med_offset_buttons(med, lang)
+    rows = [offs[i:i + 3] for i in range(0, len(offs), 3)]
+    if names:
+        rows.append([InlineKeyboardButton(n, callback_data=f"mc:pick:{med.id}:{i}")
+                     for i, n in enumerate(names)])
+        rows.append([InlineKeyboardButton(t(lang, "btn_med_type"),
+                                          callback_data=f"mc:type:{med.id}")])
+    else:
+        # Истории ещё нет — одна кнопка «дать название» (ручной ввод).
+        rows.append([InlineKeyboardButton(t(lang, "btn_med_name"),
+                                          callback_data=f"mc:type:{med.id}")])
+    rows.append([InlineKeyboardButton(t(lang, "btn_delete"),
+                                      callback_data=f"mc:del:{med.id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _med_card_markup(context: ContextTypes.DEFAULT_TYPE, med: db.Med,
+                     lang: str) -> InlineKeyboardMarkup:
+    """Клавиатура карточки + снимок названий в user_data. Снимок и показанные
+    кнопки строятся ВМЕСТЕ на каждой перерисовке (в том числе в тике), поэтому
+    индекс из `mc:pick` всегда адресует то название, что видно сейчас, — тот же
+    приём от гонки порядка, что был у подменю, но на живой карточке."""
+    names = db.recent_med_names(med.user_id, MED_NAME_BUTTONS)
+    if context.user_data is not None:
+        context.user_data[f"medopts:{med.id}"] = list(names)
+    return _med_card_keyboard(med, lang, names)
+
+
+def _med_when_keyboard(med: db.Med, lang: str) -> InlineKeyboardMarkup:
+    """Старое подменю «когда» — осталось для карточек, уже висящих в истории
+    чата с кнопкой «⏱ Когда». Новые карточки показывают сдвиги сразу."""
+    offs = _med_offset_buttons(med, lang)
+    rows = [offs[i:i + 3] for i in range(0, len(offs), 3)]
     rows.append([InlineKeyboardButton(t(lang, "btn_med_back"), callback_data=f"mc:back:{med.id}")])
     return InlineKeyboardMarkup(rows)
 
@@ -922,7 +946,7 @@ async def _send_med_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
         try:
             await context.bot.edit_message_text(
                 text, chat_id=chat_id, message_id=med.card_msg,
-                reply_markup=_med_card_keyboard(med, lang),
+                reply_markup=_med_card_markup(context, med, lang),
             )
             _schedule_med_tick(context.job_queue, med.user_id, med.id, chat_id)
             return
@@ -939,7 +963,7 @@ async def _send_med_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
             except Exception:
                 pass
     sent = await context.bot.send_message(
-        chat_id, text, reply_markup=_med_card_keyboard(med, lang))
+        chat_id, text, reply_markup=_med_card_markup(context, med, lang))
     db.set_med_card_msg(med.user_id, med.id, sent.message_id)
     _schedule_med_tick(context.job_queue, med.user_id, med.id, chat_id)
 
@@ -990,7 +1014,7 @@ async def _med_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await context.bot.edit_message_text(
             report.med_card(med, lang), chat_id=chat_id, message_id=med.card_msg,
-            reply_markup=_med_card_keyboard(med, lang),
+            reply_markup=_med_card_markup(context, med, lang),
         )
     except Exception as exc:
         if "not modified" not in str(exc):
@@ -1350,6 +1374,65 @@ async def action_end_episode(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await _send_card(update, context, ep, lang)
 
 
+def _norm_med_name(name: "str | None") -> str:
+    """Название к сравнимому виду: регистронезависимо, без краевых и двойных
+    пробелов. «Конкор», «конкор», « конкор » — одно и то же."""
+    return " ".join((name or "").casefold().split())
+
+
+def _dl_distance(a: str, b: str) -> int:
+    """Расстояние Дамерау–Левенштейна (ограниченное): вставка/удаление/замена и
+    перестановка соседних букв — каждая по 1. «конкор»↔«конкро» = 1."""
+    la, lb = len(a), len(b)
+    if not la:
+        return lb
+    if not lb:
+        return la
+    prev2 = None
+    prev = list(range(lb + 1))
+    for i in range(1, la + 1):
+        cur = [i] + [0] * lb
+        for j in range(1, lb + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        prev2, prev = prev, cur
+    return prev[lb]
+
+
+def _med_names_match(a: "str | None", b: "str | None") -> bool:
+    """Одно ли это лекарство. Регистр и пробелы игнорируем всегда; опечатку
+    (пара перепутанных букв) прощаем тем щедрее, чем длиннее название, чтобы не
+    склеить два разных коротких препарата. Пустое имя не совпадает ни с чем."""
+    a, b = _norm_med_name(a), _norm_med_name(b)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    n = min(len(a), len(b))
+    if n <= 3:
+        return False  # слишком коротко, чтобы прощать опечатку безопасно
+    limit = 1 if n <= 7 else 2
+    return _dl_distance(a, b) <= limit
+
+
+def _retire_same_name(context: ContextTypes.DEFAULT_TYPE, user_id: int,
+                      keep: db.Med) -> None:
+    """Новая доза того же лекарства — у прежних ЖИВЫХ карточек этого препарата
+    счётчик гаснет (запись остаётся): «сколько прошло с последнего приёма»
+    теперь считает новая карточка. Совпадение имени — терпимое к регистру и
+    опечатке (`_med_names_match`)."""
+    if not keep.name:
+        return
+    for m in db.live_med_cards(user_id, config.MED_TICK_MAX_H * 60):
+        if m.id == keep.id:
+            continue
+        if _med_names_match(m.name, keep.name):
+            db.set_med_card_msg(user_id, m.id, None)
+            _cancel_med_tick(context.job_queue, user_id, m.id)
+
+
 def _enforce_live_med_cap(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
     """Снимает счётчик с самых давних карточек, если живых больше предела.
     Запись приёма при этом НЕ блокируется (один тап = факт) — гаснет лишь
@@ -1388,6 +1471,7 @@ async def action_med(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         reply_markup=main_keyboard(_active(user_id) is not None, lang),
     )
     await _send_med_card(update, context, med, lang)
+    _retire_same_name(context, user_id, med)
     _enforce_live_med_cap(context, user_id)
 
 
@@ -1544,6 +1628,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 db.set_med_name(user_id, target_id, name)  # «названную» раскладку
             med = db.get_med(user_id, target_id)
             await _send_med_card(update, context, med, lang, force_new=True)
+            _retire_same_name(context, user_id, med)
             # Ввод текста прячет нижнюю плашку за системной клавиатурой, а
             # инлайн-карточка её не возвращает — поэтому плашку досылаем
             # последним сообщением (как у эпизода после ввода пульса/заметки).
@@ -1803,7 +1888,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             try:
                 await query.edit_message_text(
                     report.med_card(med, lang),
-                    reply_markup=_med_card_keyboard(med, lang))
+                    reply_markup=_med_card_markup(context, med, lang))
             except Exception as exc:
                 if "not modified" not in str(exc):
                     log.warning("Карточка приёма не обновилась: %s", exc)
@@ -1849,7 +1934,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     log.warning("Выбор названия не открылся: %s", exc)
             return
         if sub == "pick":  # название из снимка истории
-            names = context.user_data.get(f"medopts:{med_id}") or []
+            names = (context.user_data.get(f"medopts:{med_id}")
+                     or db.recent_med_names(user_id, MED_NAME_BUTTONS))
             idx = _arg(parts, 3, range(len(names))) if names else None
             if idx is None:
                 await ack(t(lang, "med_list_stale"))
@@ -1859,7 +1945,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data.pop(f"medpanel:{med_id}", None)
             context.user_data.pop("await", None)
             await ack(t(lang, "ack_saved"))
-            await _send_med_card(update, context, db.get_med(user_id, med_id), lang)
+            picked = db.get_med(user_id, med_id)
+            await _send_med_card(update, context, picked, lang)
+            _retire_same_name(context, user_id, picked)
             return
         if sub == "type":  # ввести название вручную
             context.user_data["await"] = {"what": "med", "id": med_id}
