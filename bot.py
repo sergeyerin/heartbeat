@@ -886,10 +886,17 @@ def _med_card_keyboard(med: db.Med, lang: str) -> InlineKeyboardMarkup:
 
 def _med_when_keyboard(med: db.Med, lang: str) -> InlineKeyboardMarkup:
     buttons = []
+    # «только что» = точное время (approx=0) — именно его ставит свежая карточка,
+    # поэтому по умолчанию отмечаем его «● » (точка = выбранное, как у тяжести).
+    now_selected = not med.approx
     for m in MED_WHEN_OFFSETS:
-        label = (t(lang, "btn_med_now") if m == 0
-                 else t(lang, "btn_med_ago",
-                        dur=report.human_duration(timedelta(minutes=m), lang)))
+        if m == 0:
+            label = t(lang, "btn_med_now")
+            if now_selected:
+                label = "● " + label
+        else:
+            label = t(lang, "btn_med_ago",
+                      dur=report.human_duration(timedelta(minutes=m), lang))
         buttons.append(InlineKeyboardButton(label, callback_data=f"mc:set:{med.id}:{m}"))
     rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
     rows.append([InlineKeyboardButton(t(lang, "btn_med_back"), callback_data=f"mc:back:{med.id}")])
@@ -1812,6 +1819,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             names = db.recent_med_names(user_id)
             context.user_data[f"medopts:{med_id}"] = list(names)
             context.user_data[f"medpanel:{med_id}"] = "name"
+            # «Что приняли?» приглашает печатать — ловим ввод как название, иначе
+            # набранный текст уезжал в «Записать как новый эпизод?».
+            context.user_data["await"] = {"what": "med", "id": med_id}
             await ack()
             title = report.med_card(med, lang) + "\n\n" + t(lang, "med_pick_name")
             try:
@@ -1830,6 +1840,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             db.set_med_name(user_id, med_id, names[idx])
             context.user_data.pop(f"medopts:{med_id}", None)
             context.user_data.pop(f"medpanel:{med_id}", None)
+            context.user_data.pop("await", None)
             await ack(t(lang, "ack_saved"))
             await _send_med_card(update, context, db.get_med(user_id, med_id), lang)
             return

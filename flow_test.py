@@ -1660,6 +1660,49 @@ async def run() -> None:
           "в панели приёма нейтральная «Назад», а не «К эпизоду»")
     db.delete_med(uid, nam.id)
 
+    # 19u. «Что приняли?» ловит набранный ответ (не уводит его в «новый эпизод»);
+    # сетка «когда» помечает выбранное «● только что» и подписывает минусами.
+    while bot._current_episode(uid) is not None:  # чистое поле для проверки эпизодов
+        cur = bot._current_episode(uid)
+        db.close_episode(uid, cur.id)
+        age_out(uid, cur.id, days=3)
+    typed = db.add_med(uid, None, db.utcnow())
+    eps_before = db.count_episodes(uid)
+    fake.sent.clear()
+    await press(f"mc:name:{typed.id}")
+    check(ud.get("await") == {"what": "med", "id": typed.id},
+          "панель «Что приняли?» переводит бота в ожидание названия")
+    await tap("Валерьянка")  # печатаем, НЕ нажимая «✏️ Другое»
+    check(db.get_med(uid, typed.id).name == "Валерьянка",
+          "набранный у «Что приняли?» текст становится названием")
+    check(db.count_episodes(uid) == eps_before, "и не создаёт новый эпизод")
+    check(not any(t(LANG, "ask_text_as_episode") in m for m in fake.sent),
+          "и не предлагает «записать как новый эпизод»")
+
+    # выбор из списка тоже снимает ожидание — иначе следующий текст стал бы
+    # названием вместо заметки
+    await press(f"mc:name:{typed.id}")
+    snap = ud.get(f"medopts:{typed.id}") or []
+    if snap:
+        await press(f"mc:pick:{typed.id}:0")
+        check("await" not in ud, "выбор названия из списка снимает ожидание ввода")
+
+    # отметка выбранного и минусы в сетке «когда»
+    fresh = db.add_med(uid, "конкор", db.utcnow())  # approx=False → «только что»
+    kb = bot._med_when_keyboard(db.get_med(uid, fresh.id), LANG)
+    flat = [b.text for row in kb.inline_keyboard for b in row]
+    now_label = next(x for x in flat if "только что" in x)
+    check(now_label.startswith("● "), "у свежего приёма «только что» помечено точкой")
+    minute_labels = [x for x in flat if "мин" in x or (" ч" in x and "только" not in x)]
+    check(minute_labels and all(x.startswith("−") for x in minute_labels),
+          "кнопки минут подписаны минусом — «−15 мин» это «15 минут назад»")
+    db.set_med_time(uid, fresh.id, db.utcnow() - timedelta(minutes=30), approx=True)
+    kb2 = bot._med_when_keyboard(db.get_med(uid, fresh.id), LANG)
+    flat2 = [b.text for row in kb2.inline_keyboard for b in row]
+    now2 = next(x for x in flat2 if "только что" in x)
+    check(not now2.startswith("● "), "у приёма с примерным временем «только что» не помечено")
+    db.delete_med(uid, typed.id); db.delete_med(uid, fresh.id)
+
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять
     if db.last_episode(uid) is None:

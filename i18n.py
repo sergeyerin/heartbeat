@@ -306,7 +306,7 @@ STRINGS: dict[str, dict[str, str]] = {
     "btn_med_when": {"ru": "⏱ Когда", "en": "⏱ When"},
     "btn_med_name": {"ru": "💊 Название", "en": "💊 Name"},
     "btn_med_now": {"ru": "только что", "en": "just now"},
-    "btn_med_ago": {"ru": "{dur}", "en": "{dur}"},
+    "btn_med_ago": {"ru": "−{dur}", "en": "−{dur}"},
     "btn_med_type": {"ru": "✏️ Другое", "en": "✏️ Other"},
     "btn_med_back": {"ru": "← Назад", "en": "← Back"},
     "med_ask_when_generic": {"ru": "Когда приняли лекарство?",
