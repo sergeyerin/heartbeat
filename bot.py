@@ -395,14 +395,9 @@ def _day_keyboard(day: date, lang: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton((day + timedelta(days=1)).strftime("%d.%m") + " ➡️",
                                  callback_data=f"dn:{day + timedelta(days=1)}")
         )
-    offset = (report.today_local() - day).days
-    if offset in BACKFILL_OFFSETS:
-        # Сводка — правильное место входа: человек утром видит, что ночного
-        # приступа в списке нет, и кнопка рядом; день она уже знает, поэтому
-        # шаг выбора дня пропускается. Окно то же, что у /earlier: владелец
-        # решил, что глубже позавчера запись не нужна.
-        rows.append([InlineKeyboardButton(t(lang, "btn_backfill"),
-                                          callback_data=f"bf:n:{day}")])
+    # Кнопку «приступ в этот день» из сводки владелец убрал: вход в ретроспективу
+    # остаётся командой /earlier. Обработчик bf:n сохранён — старые кнопки в
+    # истории чата не должны падать.
     return InlineKeyboardMarkup(rows)
 
 
@@ -2634,10 +2629,10 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def _commands(lang: str) -> list[BotCommand]:
     return [
-        # Команды, дублирующие нижнюю плашку (⚡️ log/stop, 💊 med,
-        # «Сегодня» today), из меню убраны — они засоряют и список
-        # команд, и чат. Хендлеры остаются рабочими (мышечная память,
-        # подсказки), просто не рекламируются, как и /cancel.
+        # Приём лекарств — в приоритете, поэтому /med первым. Остальные дубли
+        # плашки (⚡️ log/stop, «Сегодня» today) из меню убраны — они засоряют
+        # список команд. Хендлеры остаются рабочими, как и /cancel.
+        BotCommand("med", t(lang, "cmd_med")),
         BotCommand("earlier", t(lang, "cmd_earlier")),
         BotCommand("last", t(lang, "cmd_last")),
         BotCommand("yesterday", t(lang, "cmd_yesterday")),

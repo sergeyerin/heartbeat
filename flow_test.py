@@ -1352,18 +1352,16 @@ async def run() -> None:
     check(max(hours_offered) == now_local.hour,
           f"сегодня последний час — текущий ({max(hours_offered)})")
 
-    # Кнопка в сводке дня: есть у свежих дней, нет у старых, дата абсолютная.
+    # Кнопку «приступ в этот день» из сводки владелец убрал — входа в
+    # ретроспективу из сводки больше нет (остаётся команда /earlier).
     kb_today = bot._day_keyboard(today_d, LANG)
-    flat_today = [b.callback_data for row in kb_today.inline_keyboard for b in row]
-    check(f"bf:n:{today_d}" in flat_today,
-          "в сегодняшней сводке вход в ретроспективу с абсолютной датой")
-    kb_old = bot._day_keyboard(today_d - timedelta(days=10), LANG)
-    flat_old = [(b.callback_data or "") for row in kb_old.inline_keyboard for b in row]
-    check(not any(c.startswith("bf:") for c in flat_old),
-          "у старых дней входа нет — владелец ограничил тремя днями")
+    flat_today = [(b.callback_data or "") for row in kb_today.inline_keyboard for b in row]
+    check(not any(c.startswith("bf:") for c in flat_today),
+          "в сводке дня больше нет кнопки входа в ретроспективу")
+    # но старый вход из истории (bf:n) всё ещё обрабатывается и не роняет бота
     fake.sent.clear()
     await press(f"bf:n:{yd}")
-    check(fake.sent, "вход из сводки присылает новое сообщение, сводка цела")
+    check(fake.sent, "старый вход из сводки (bf:n) по-прежнему обрабатывается")
 
     # Отклонённый мусор не сжигает слот лимита частоты у честного нажатия.
     saved_interval = cfg.MIN_ACTION_INTERVAL_SEC
@@ -1499,8 +1497,9 @@ async def run() -> None:
     check("cancel" not in [c.command for c in bot._commands(LANG)],
           "/cancel убрана из списка команд")
     menu_cmds = [c.command for c in bot._commands(LANG)]
-    for dup in ("log", "stop", "med", "today"):
-        check(dup not in menu_cmds, f"/{dup} убрана из меню — дублирует плашку")
+    check(menu_cmds[0] == "med", "/med первым в меню — приоритет на лекарства")
+    for dup in ("log", "stop", "today"):
+        check(dup not in menu_cmds, f"/{dup} не в меню — дублирует плашку")
     for keep in ("earlier", "export", "forget"):
         check(keep in menu_cmds, f"/{keep} остаётся в меню")
 

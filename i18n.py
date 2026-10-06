@@ -455,7 +455,6 @@ STRINGS: dict[str, dict[str, str]] = {
     # Решения владельца: только кнопки (ручного ввода дат и времени нет),
     # только сегодня/вчера/позавчера, окончание — примерной длительностью.
     "cmd_earlier": {"ru": "записать прошедший приступ", "en": "log a past episode"},
-    "btn_backfill": {"ru": "➕ Приступ в этот день", "en": "➕ Episode on this day"},
     "btn_day_today": {"ru": "Сегодня", "en": "Today"},
     "btn_day_yesterday": {"ru": "Вчера", "en": "Yesterday"},
     "btn_day_before": {"ru": "Позавчера", "en": "2 days ago"},
