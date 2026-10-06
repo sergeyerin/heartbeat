@@ -1662,11 +1662,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if name:  # пустое имя не затирает уже заданное и не рисует
                 db.set_med_name(user_id, target_id, name)  # «названную» раскладку
             med = db.get_med(user_id, target_id)
-            # Карточка — сама себе подтверждение: правим её НА МЕСТЕ и больше
-            # ничего не шлём. Плашку вернул явный запрос ввода (mc:type); новых
-            # сообщений после ввода нет, поэтому она остаётся на месте.
+            # Карточку правим НА МЕСТЕ, а ответом шлём короткое «✅ Сохранил» с
+            # плашкой: без ответа ввод казался проглоченным (имя могло не
+            # измениться — оно и так стояло по умолчанию), а длинное «Записал:
+            # <имя>» дублировало карточку. Этот ответ ещё и возвращает плашку
+            # (набор текста её прячет).
             await _send_med_card(update, context, med, lang)
             _retire_same_name(context, user_id, med)
+            await update.message.reply_text(
+                t(lang, "med_saved_ack"),
+                reply_markup=main_keyboard(_active(user_id) is not None, lang))
             return
 
     ep = _current_episode(user_id)

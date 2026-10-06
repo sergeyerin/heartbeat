@@ -1557,13 +1557,17 @@ async def run() -> None:
           "ожидание ввода написано ЯВНО отдельным сообщением")
     check(any(isinstance(m, type(bot.main_keyboard(True, LANG))) for m in fake.markups),
           "запрос ввода несёт нижнюю плашку")
-    fake.edited.clear(); fake.sent.clear()
+    fake.edited.clear(); fake.sent.clear(); fake.markups.clear()
     await tap("аспирин")
     check(db.get_med(uid, mcard.id).name == "аспирин", "название сменилось вводом")
     check(any("аспирин" in e for e in fake.edited),
           "карточка после ввода правится НА МЕСТЕ (в edited)")
+    check(any("Сохранил" in s for s in fake.sent),
+          "есть явный короткий ответ «✅ Сохранил» (ввод не проглочен)")
     check(not any("Записал" in s for s in fake.sent),
-          "после ввода нет лишнего подтверждения «Записал»")
+          "но без старого дубля «Записал: <имя>»")
+    check(any(isinstance(m, type(bot.main_keyboard(True, LANG))) for m in fake.markups),
+          "и ответ возвращает нижнюю плашку")
 
     # удаление — только с токеном
     await press(f"mc:del:{mcard.id}")

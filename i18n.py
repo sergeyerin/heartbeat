@@ -304,6 +304,7 @@ STRINGS: dict[str, dict[str, str]] = {
     "med_card_ago": {"ru": "⏳ прошло {dur}", "en": "⏳ {dur} ago"},
     "med_card_when": {"ru": "{day} в {time}", "en": "{day} at {time}"},
     "med_tag": {"ru": "#лекарство", "en": "#medication"},
+    "med_saved_ack": {"ru": "✅ Сохранил", "en": "✅ Saved"},
     "med_pick_name": {"ru": "Что приняли?", "en": "What did you take?"},
     "med_ask_when": {"ru": "Когда приняли {name}?", "en": "When did you take {name}?"},
     "btn_med_when": {"ru": "⏱ Когда", "en": "⏱ When"},
