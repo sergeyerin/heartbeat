@@ -196,6 +196,17 @@ def _episode_line(ep: Episode, now: datetime, lang: str) -> list[str]:
     return out
 
 
+# Время суток для группировки приёмов. Порядок — утро→день→вечер→ночь (ночь =
+# ранние часы той же даты, по решению владельца идёт последней). Показываем
+# только непустые разделы.
+DAY_PARTS = (
+    ("morning", range(6, 12)),
+    ("day", range(12, 18)),
+    ("evening", range(18, 24)),
+    ("night", range(0, 6)),
+)
+
+
 def day_summary(day: date, episodes: list[Episode], meds: list[Med], lang: str) -> str:
     now = datetime.now(timezone.utc)
     title = t(lang, "day_title_today") if day == today_local() else day_title(day, lang)
@@ -204,25 +215,37 @@ def day_summary(day: date, episodes: list[Episode], meds: list[Med], lang: str) 
         lines.append(t(lang, "day_empty"))
         return "\n".join(lines)
 
-    closed = [ep for ep in episodes if not ep.is_open]
-    total = sum((ep.duration() for ep in closed), timedelta())
-    summary = t(lang, "day_count", n=len(episodes))
-    if closed:
-        summary += t(lang, "day_total", dur=human_duration(total, lang))
-    lines.append(summary)
-    lines.append("")
+    # Приёмы лекарств — сверху, сгруппированы по времени суток.
+    buckets: dict[str, list[Med]] = {key: [] for key, _ in DAY_PARTS}
+    for m in meds:
+        hour = local(m.taken_at).hour
+        for key, hours in DAY_PARTS:
+            if hour in hours:
+                buckets[key].append(m)
+                break
+    for key, _ in DAY_PARTS:
+        part = sorted(buckets[key], key=lambda m: m.taken_at)
+        if not part:
+            continue
+        lines.append("")
+        lines.append(t(lang, "day_part_" + key))
+        for m in part:
+            lines.append(t(lang, "line_med", time=hhmm(m.taken_at),
+                           name=m.name or t(lang, "med_default")))
 
-    # Эпизоды и лекарства — одной лентой по времени.
-    feed: list[tuple[datetime, list[str]]] = [
-        (ep.started_at, _episode_line(ep, now, lang)) for ep in episodes
-    ]
-    feed += [
-        (m.taken_at, [t(lang, "line_med", time=hhmm(m.taken_at),
-                        name=m.name or t(lang, "med_default"))])
-        for m in meds
-    ]
-    for _, block in sorted(feed, key=lambda item: item[0]):
-        lines += block
+    # Аритмии — отдельным блоком внизу. При нуле — честная строка вместо «0».
+    lines.append("")
+    if episodes:
+        closed = [ep for ep in episodes if not ep.is_open]
+        head = t(lang, "day_count", n=len(episodes))
+        if closed:
+            total = sum((ep.duration() for ep in closed), timedelta())
+            head += t(lang, "day_total", dur=human_duration(total, lang))
+        lines.append(head)
+        for ep in sorted(episodes, key=lambda e: e.started_at):
+            lines += _episode_line(ep, now, lang)
+    else:
+        lines.append(t(lang, "day_no_episodes"))
     return "\n".join(lines)
 
 

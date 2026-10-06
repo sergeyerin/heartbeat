@@ -192,6 +192,29 @@ def main() -> int:
         check("Сегодня" in summary and "💊" in summary, "сводка за день с лекарствами")
         check("Записей нет" in report.day_summary(day, [], [], LANG), "пустой день")
 
+        # --- сводка дня: приёмы по времени суток, аритмии отдельным блоком ---
+        import config as _cfg
+        from datetime import datetime as _dtt, timezone as _tz
+
+        def _at_local_hour(h):
+            loc = _dtt.now(_cfg.local_tz()).replace(hour=h, minute=0, second=0,
+                                                     microsecond=0)
+            return loc.astimezone(_tz.utc)
+
+        morning = db.Med(id=901, user_id=uid, taken_at=_at_local_hour(8), name="Витамин B6")
+        noon = db.Med(id=902, user_id=uid, taken_at=_at_local_hour(14), name="Валерьянка")
+        grp = report.day_summary(report.today_local(), [], [morning, noon], LANG)
+        check("🌅 Утро" in grp and "☀️ День" in grp, "сводка: разделы утро и день показаны")
+        check("🌆 Вечер" not in grp and "🌙 Ночь" not in grp, "пустые разделы не показываются")
+        check(grp.index("🌅 Утро") < grp.index("☀️ День"), "утро идёт раньше дня")
+        check("Аритмии не регистрировали" in grp and "Эпизодов" not in grp,
+              "при нуле эпизодов — «Аритмии не регистрировали», без «Эпизодов: 0»")
+        with_ep = report.day_summary(report.today_local(),
+                                     db.list_episodes(uid, start, end), [noon], LANG)
+        check("⚡️ Аритмии" in with_ep, "с эпизодами — блок «⚡️ Аритмии»")
+        check(with_ep.index("☀️ День") < with_ep.index("⚡️ Аритмии"),
+              "лекарства сверху, аритмии — блоком внизу")
+
         month_start, _ = report.day_bounds(day - timedelta(days=29))
         rep = report.period_report(30, db.list_episodes(uid, month_start), db.list_meds(uid, month_start), LANG)
         check("Отчёт за 30" in rep and "По времени суток" in rep, "отчёт за период")
