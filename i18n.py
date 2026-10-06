@@ -297,7 +297,6 @@ STRINGS: dict[str, dict[str, str]] = {
     "med_unnamed": {"ru": "Лекарство", "en": "Medication"},
     "med_logged": {"ru": "💊 Записал приём в {time}.",
                    "en": "💊 Medication logged at {time}."},
-    "med_saved": {"ru": "💊 Записал: {name}.", "en": "💊 Saved: {name}."},
     "med_locked": {"ru": "Эту запись уже не изменить — прошло время. Можно удалить.",
                    "en": "This entry is locked now — too late to change. You can delete it."},
     "med_card_fresh": {"ru": "💊 {name} — принято только что",

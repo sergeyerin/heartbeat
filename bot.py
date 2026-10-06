@@ -1662,14 +1662,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if name:  # пустое имя не затирает уже заданное и не рисует
                 db.set_med_name(user_id, target_id, name)  # «названную» раскладку
             med = db.get_med(user_id, target_id)
-            # Карточку правим НА МЕСТЕ (не дублируем новым сообщением), а плашку
-            # досылаем одной короткой репликой: набор текста её спрятал, а
-            # инлайн-карточка не возвращает. Это единственное новое сообщение.
+            # Карточка — сама себе подтверждение: правим её НА МЕСТЕ и больше
+            # ничего не шлём. Плашку вернул явный запрос ввода (mc:type); новых
+            # сообщений после ввода нет, поэтому она остаётся на месте.
             await _send_med_card(update, context, med, lang)
             _retire_same_name(context, user_id, med)
-            await update.message.reply_text(
-                t(lang, "med_saved", name=med.name or t(lang, "med_unnamed")),
-                reply_markup=main_keyboard(_active(user_id) is not None, lang))
             return
 
     ep = _current_episode(user_id)
@@ -2011,9 +2008,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if sub == "type":  # ввести название вручную
             context.user_data["await"] = {"what": "med", "id": med_id}
-            # Подсказка всплывашкой, а не сообщением: экран приёма и так зовёт
-            # печатать, а лишняя реплика в чате — мусор.
-            await ack(t(lang, "med_name_prompt"))
+            await ack()
+            # Ожидание ввода пишем ЯВНО отдельным сообщением (всплывашку человек
+            # не замечает) и вешаем на него плашку: набор текста её прячет, а
+            # новых сообщений после ввода мы не шлём — значит эта и останется.
+            await query.message.reply_text(
+                t(lang, "med_name_prompt"),
+                reply_markup=main_keyboard(_active(user_id) is not None, lang))
             return
         if sub == "del":  # подтверждение удаления (одноразовый токен)
             token = secrets.token_urlsafe(4)

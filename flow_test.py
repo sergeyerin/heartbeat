@@ -1548,21 +1548,22 @@ async def run() -> None:
     check(any("1 ч" in m and "назад" in m for m in fake.edited),
           "счётчик показывает «принято 1 ч ... назад»")
 
-    # сменить название
+    # сменить название: ожидание ввода — ЯВНЫМ сообщением с плашкой; после ввода
+    # карточка правится на месте, без лишнего подтверждения.
     await press(f"mc:name:{mcard.id}")
-    fake.sent.clear(); fake.answers.clear()
+    fake.sent.clear(); fake.markups.clear()
     await press(f"mc:type:{mcard.id}")
-    check(not any("Напишите название" in m for m in fake.sent),
-          "подсказка ввода названия — не сообщением в чат")
-    check(any("Напишите название" in a for a in fake.answers),
-          "подсказка ввода названия показана всплывашкой (а не пропала)")
+    check(any("Напишите название" in m for m in fake.sent),
+          "ожидание ввода написано ЯВНО отдельным сообщением")
+    check(any(isinstance(m, type(bot.main_keyboard(True, LANG))) for m in fake.markups),
+          "запрос ввода несёт нижнюю плашку")
     fake.edited.clear(); fake.sent.clear()
     await tap("аспирин")
     check(db.get_med(uid, mcard.id).name == "аспирин", "название сменилось вводом")
     check(any("аспирин" in e for e in fake.edited),
-          "карточка после ввода имени правится НА МЕСТЕ (в edited)")
-    check(not any("принято" in s and "аспирин" in s for s in fake.sent),
-          "и не дублируется новым сообщением (карточки нет в sent)")
+          "карточка после ввода правится НА МЕСТЕ (в edited)")
+    check(not any("Записал" in s for s in fake.sent),
+          "после ввода нет лишнего подтверждения «Записал»")
 
     # удаление — только с токеном
     await press(f"mc:del:{mcard.id}")
@@ -1718,16 +1719,12 @@ async def run() -> None:
     await press(f"mc:name:{typed.id}")
     check(ud.get("await") == {"what": "med", "id": typed.id},
           "панель «Что приняли?» переводит бота в ожидание названия")
-    fake.markups.clear()  # чтобы плашку считать именно из ответа на ввод
     await tap("Валерьянка")  # печатаем, НЕ нажимая «✏️ Другое»
     check(db.get_med(uid, typed.id).name == "Валерьянка",
           "набранный у «Что приняли?» текст становится названием")
     check(db.count_episodes(uid) == eps_before, "и не создаёт новый эпизод")
     check(not any(t(LANG, "ask_text_as_episode") in m for m in fake.sent),
           "и не предлагает «записать как новый эпизод»")
-    plate_type = type(bot.main_keyboard(True, LANG))
-    check(any(isinstance(m, plate_type) for m in fake.markups),
-          "после ввода названия нижняя плашка возвращается")
 
     # выбор из списка тоже снимает ожидание — иначе следующий текст стал бы
     # названием вместо заметки
