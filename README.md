@@ -251,8 +251,11 @@ Things worth knowing:
 | `EPISODE_WINDOW_MIN` | `30` | episode window: when to ask "has it stopped?", and how much «⏳ Still ongoing» adds (0 — never ask) |
 | `STALE_AFTER_MIN` | two windows (`60`) | minutes of silence that mean "no end time" |
 | `CARD_TICK_SEC` | `60` | how often the card of an ongoing episode is redrawn (0 — never) |
+| `MED_TICK_MAX_H` | `24` | how many hours a medication card keeps counting before its tick stops |
 | `MAX_EPISODES_PER_USER` | `5000` | cap on episodes per person |
 | `MAX_OPEN_EPISODES` | `10` | cap on unclosed episodes per person |
+| `MAX_MEDS_PER_USER` | `5000` | cap on medication entries per person |
+| `MAX_LIVE_MED_CARDS` | `10` | cap on live (ticking) medication cards per person; older ones stop counting, the entry stays |
 | `MIN_ACTION_INTERVAL_SEC` | `1.5` | minimum gap between episode/medication entries |
 | `EXPORT_COOLDOWN_SEC` | `60` | cooldown on /export, which builds the whole diary in memory |
 | `RECENT_EPISODE_MIN` | `180` | how long after an episode ends plain input still attaches to it |

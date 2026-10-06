@@ -29,11 +29,19 @@ RECENT_EPISODE_MIN = int(os.getenv("RECENT_EPISODE_MIN", "180"))
 # Как часто перерисовывать карточку идущего эпизода, секунд. 0 = не обновлять.
 # Чаще минуты незачем: секунды в дневнике не нужны, а каждая правка — вызов API.
 CARD_TICK_SEC = int(os.getenv("CARD_TICK_SEC", "60"))
+# Сколько часов живёт счётчик на карточке приёма лекарства: дольше суток «принято
+# N назад» для «когда следующий раз» не нужно, тик останавливается.
+MED_TICK_MAX_H = int(os.getenv("MED_TICK_MAX_H", "24"))
 
 # Предохранители для публичного бота: один человек не должен ни исчерпать
 # диск, ни затормозить остальных в однопроцессном боте.
 MAX_EPISODES_PER_USER = int(os.getenv("MAX_EPISODES_PER_USER", "5000"))
 MAX_OPEN_EPISODES = int(os.getenv("MAX_OPEN_EPISODES", "10"))
+# Лекарства — тот же класс ресурса: строка + ежеминутная задача на карточку.
+# MAX_MEDS_PER_USER бережёт диск, MAX_LIVE_MED_CARDS — очередь задач (иначе
+# один человек заведёт десятки тысяч тиков и затормозит остальных).
+MAX_MEDS_PER_USER = int(os.getenv("MAX_MEDS_PER_USER", "5000"))
+MAX_LIVE_MED_CARDS = int(os.getenv("MAX_LIVE_MED_CARDS", "10"))
 MIN_ACTION_INTERVAL_SEC = float(os.getenv("MIN_ACTION_INTERVAL_SEC", "1.5"))
 EXPORT_COOLDOWN_SEC = int(os.getenv("EXPORT_COOLDOWN_SEC", "60"))
 

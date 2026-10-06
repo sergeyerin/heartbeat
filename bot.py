@@ -63,6 +63,11 @@ SHIFT_CHOICES = (5, 15, 30)
 # (15–30) или «уснул, увлёкся» (45–90), и 45 набирается двумя нажатиями.
 END_SHIFT_CHOICES = (15, 30, 60)
 
+# Сетка «когда приняли лекарство»: шаг 15 минут вблизи (где важно для «когда
+# следующий раз»), крупнее дальше. «только что» = точное время, остальное —
+# примерно.
+MED_WHEN_OFFSETS = (0, 15, 30, 45, 60, 90, 120, 180, 240, 360)
+
 # Ретроспективная запись. Состояние потока живёт в payload кнопки, а не в
 # user_data: `bf:f:2:23:40:30` — 15 байт из 64 доступных, переживает рестарт,
 # не перехватывает свободный текст (который должен оставаться заметкой к
@@ -860,6 +865,136 @@ def _schedule_reminder(job_queue, user_id: int, episode_id: int,
     )
 
 
+def _med_card_keyboard(med: db.Med, lang: str) -> InlineKeyboardMarkup:
+    if med.name is None:
+        # Название ещё не задано — предлагаем его сразу на карточке.
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(t(lang, "btn_med_name"), callback_data=f"mc:name:{med.id}")],
+            [
+                InlineKeyboardButton(t(lang, "btn_med_when"), callback_data=f"mc:when:{med.id}"),
+                InlineKeyboardButton(t(lang, "btn_delete"), callback_data=f"mc:del:{med.id}"),
+            ],
+        ])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(t(lang, "btn_med_when"), callback_data=f"mc:when:{med.id}"),
+            InlineKeyboardButton(t(lang, "btn_med_name"), callback_data=f"mc:name:{med.id}"),
+        ],
+        [InlineKeyboardButton(t(lang, "btn_delete"), callback_data=f"mc:del:{med.id}")],
+    ])
+
+
+def _med_when_keyboard(med: db.Med, lang: str) -> InlineKeyboardMarkup:
+    buttons = []
+    for m in MED_WHEN_OFFSETS:
+        label = (t(lang, "btn_med_now") if m == 0
+                 else t(lang, "btn_med_ago",
+                        dur=report.human_duration(timedelta(minutes=m), lang)))
+        buttons.append(InlineKeyboardButton(label, callback_data=f"mc:set:{med.id}:{m}"))
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    rows.append([InlineKeyboardButton(t(lang, "btn_med_back"), callback_data=f"mc:back:{med.id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _med_name_keyboard(med: db.Med, lang: str, names: list[str]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(n, callback_data=f"mc:pick:{med.id}:{i}")]
+            for i, n in enumerate(names)]
+    rows.append([InlineKeyboardButton(t(lang, "btn_med_type"), callback_data=f"mc:type:{med.id}")])
+    rows.append([InlineKeyboardButton(t(lang, "btn_med_back"), callback_data=f"mc:back:{med.id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def _send_med_card(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                         med: db.Med | None, lang: str, force_new: bool = False) -> None:
+    """Отправляет/обновляет живую карточку приёма — одна на запись."""
+    if med is None:
+        return
+    chat_id = update.effective_chat.id
+    text = report.med_card(med, lang)
+    if med.card_msg and not force_new:
+        try:
+            await context.bot.edit_message_text(
+                text, chat_id=chat_id, message_id=med.card_msg,
+                reply_markup=_med_card_keyboard(med, lang),
+            )
+            _schedule_med_tick(context.job_queue, med.user_id, med.id, chat_id)
+            return
+        except Exception as exc:
+            if "not modified" in str(exc):
+                return
+    if med.card_msg:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=med.card_msg)
+        except Exception:
+            try:
+                await context.bot.edit_message_reply_markup(
+                    chat_id=chat_id, message_id=med.card_msg, reply_markup=None)
+            except Exception:
+                pass
+    sent = await context.bot.send_message(
+        chat_id, text, reply_markup=_med_card_keyboard(med, lang))
+    db.set_med_card_msg(med.user_id, med.id, sent.message_id)
+    _schedule_med_tick(context.job_queue, med.user_id, med.id, chat_id)
+
+
+def _med_tick_name(user_id: int, med_id: int) -> str:
+    return f"mtick:{user_id}:{med_id}"
+
+
+def _cancel_med_tick(job_queue, user_id: int, med_id: int) -> None:
+    if job_queue is None:
+        return
+    for job in job_queue.get_jobs_by_name(_med_tick_name(user_id, med_id)):
+        job.schedule_removal()
+
+
+def _schedule_med_tick(job_queue, user_id: int, med_id: int, chat_id: int) -> None:
+    if job_queue is None or config.CARD_TICK_SEC <= 0:
+        return
+    _cancel_med_tick(job_queue, user_id, med_id)
+    job_queue.run_repeating(
+        _med_tick,
+        interval=timedelta(seconds=config.CARD_TICK_SEC),
+        first=timedelta(seconds=config.CARD_TICK_SEC),
+        chat_id=chat_id, user_id=user_id, data={"med_id": med_id},
+        name=_med_tick_name(user_id, med_id),
+        job_kwargs={"misfire_grace_time": None, "coalesce": True},
+    )
+
+
+async def _med_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обновляет «принято N назад». Останавливается через MED_TICK_MAX_H."""
+    job = context.job
+    user_id, chat_id = job.user_id, job.chat_id
+    med = db.get_med(user_id, job.data["med_id"])
+    if med is None or med.card_msg is None:
+        job.schedule_removal()
+        return
+    # Возрастной предел проверяется ПЕРВЫМ: иначе брошенная открытая панель
+    # (ранний возврат ниже) оставляла бы тик бессмертным до рестарта.
+    if med.since() > timedelta(hours=config.MED_TICK_MAX_H):
+        job.schedule_removal()
+        return
+    # Открыта панель (когда/название/удаление) — не перерисовываем, чтобы не
+    # затереть её; тик продолжает жить до возрастного предела выше.
+    if (context.user_data or {}).get(f"medpanel:{med.id}"):
+        return
+    lang = _job_lang(user_id)
+    try:
+        await context.bot.edit_message_text(
+            report.med_card(med, lang), chat_id=chat_id, message_id=med.card_msg,
+            reply_markup=_med_card_keyboard(med, lang),
+        )
+    except Exception as exc:
+        if "not modified" not in str(exc):
+            log.warning("Карточка приёма #%s больше не правится: %s", med.id, exc)
+            # Сообщение не правится (старше 48 ч) — снимаем card_msg, чтобы
+            # post_init не воскрешал заведомо мёртвый тик после рестарта.
+            db.set_med_card_msg(user_id, med.id, None)
+            job.schedule_removal()
+            return
+
+
 def _tick_name(user_id: int, episode_id: int) -> str:
     return f"tick:{user_id}:{episode_id}"
 
@@ -1208,29 +1343,38 @@ async def action_end_episode(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await _send_card(update, context, ep, lang)
 
 
+def _enforce_live_med_cap(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    """Снимает счётчик с самых давних карточек, если живых больше предела.
+    Запись приёма при этом НЕ блокируется (один тап = факт) — гаснет лишь
+    тик у старейших, данные остаются. Так число ежеминутных задач на
+    человека ограничено, и один пользователь не топит очередь для всех."""
+    cap = config.MAX_LIVE_MED_CARDS
+    if cap <= 0:
+        return
+    live = db.live_med_cards(user_id, config.MED_TICK_MAX_H * 60)
+    for old in live[:-cap]:
+        db.set_med_card_msg(user_id, old.id, None)
+        _cancel_med_tick(context.job_queue, user_id, old.id)
+
+
 async def action_med(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = _uid(update)
     lang = _lang(update)
     if _throttled(context, "med", config.MIN_ACTION_INTERVAL_SEC):
         await update.message.reply_text(t(lang, "too_fast"))
         return
-    med = db.add_med(user_id, taken_at=update.message.date)
-    recent = db.recent_med_names(user_id)
-    rows = [
-        [InlineKeyboardButton(name, callback_data=f"mn:{med.id}:{i}")]
-        for i, name in enumerate(recent)
-    ]
-    # Снимок именно этого набора кнопок: индекс в callback_data должен
-    # разрешаться тем списком, который человек видел, а не свежим запросом.
-    context.user_data[f"med_opts:{med.id}"] = list(recent)
-    rows.append([
-        InlineKeyboardButton(t(lang, "btn_med_other"), callback_data=f"mt:{med.id}"),
-        InlineKeyboardButton(t(lang, "btn_med_cancel"), callback_data=f"md:{med.id}"),
-    ])
-    await update.message.reply_text(
-        t(lang, "med_logged", time=report.hhmm(med.taken_at)),
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
+    # Название по умолчанию — самое частое из истории: обычно его и приняли,
+    # поэтому ноль нажатий. Если истории нет, карточка сразу предложит выбрать.
+    if db.count_meds(user_id) >= config.MAX_MEDS_PER_USER:
+        await update.message.reply_text(
+            t(lang, "too_many_meds", n=config.MAX_MEDS_PER_USER))
+        return
+    default_name = db.default_med_name(user_id)
+    med = db.add_med(user_id, name=default_name, taken_at=update.message.date)
+    await _send_med_card(update, context, med, lang)
+    _enforce_live_med_cap(context, user_id)
+
+
 
 
 async def action_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1372,12 +1516,16 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         if kind == "med":
             context.user_data.pop("await", None)
-            name = i18n.trim_utf16(text, MED_NAME_LIMIT)
-            db.set_med_name(user_id, target_id, name)
-            await update.message.reply_text(
-                t(lang, "med_saved", name=name),
-                reply_markup=main_keyboard(_active(user_id) is not None, lang),
-            )
+            context.user_data.pop(f"medpanel:{target_id}", None)
+            med = db.get_med(user_id, target_id)
+            if med is None:
+                await update.message.reply_text(t(lang, "med_list_stale"))
+                return
+            name = i18n.trim_utf16(text.strip(), MED_NAME_LIMIT)
+            if name:  # пустое имя не затирает уже заданное и не рисует
+                db.set_med_name(user_id, target_id, name)  # «названную» раскладку
+            await _send_med_card(update, context, db.get_med(user_id, target_id),
+                                 lang, force_new=True)
             return
 
     ep = _current_episode(user_id)
@@ -1617,45 +1765,119 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _send_card(update, context, ep, lang)
         _schedule_reminder(context.job_queue, user_id, ep.id, _window())
         return
-    if action in ("mn", "mt", "md"):  # лекарство: имя из истории / ввести / отменить
-        med_id = _row_id(parts)
+    if action == "mc":  # карточка приёма лекарства
+        sub = parts[1] if len(parts) > 1 else ""
+        med_id = _row_id(parts, 2)
         med = db.get_med(user_id, med_id) if med_id is not None else None
         if med is None:
-            # Чужой или несуществующий id: ничего не делаем и, главное, не
-            # переводим бота в режим ожидания ввода для этой записи.
             await ack()
             return
-        if action == "mn":
-            # M4: берём снимок списка, сделанный в момент отправки кнопок.
-            # Перечитывать из БД нельзя: порядок там «по последнему приёму» и
-            # меняется, поэтому индекс начинал указывать на другое лекарство.
-            names = context.user_data.get(f"med_opts:{med_id}") or []
-            idx = _arg(parts, 2, range(len(names))) if names else None
-            name = names[idx] if idx is not None else None
-            if name:
-                db.set_med_name(user_id, med_id, name)
-                context.user_data.pop(f"med_opts:{med_id}", None)
-                await ack(t(lang, "ack_saved"))
-                await query.edit_message_text(t(lang, "med_saved", name=name))
-            else:
-                await ack(t(lang, "med_list_stale"))
-                if med.name is None:
-                    # Снимок потерян рестартом — просим название, но только для
-                    # ещё не названной своей записи.
-                    await query.message.reply_text(t(lang, "med_name_prompt"))
-                    context.user_data["await"] = {"what": "med", "id": med_id}
+        if sub == "back":  # вернуться к карточке
+            context.user_data.pop(f"medpanel:{med_id}", None)
+            context.user_data.pop("await", None)
+            await ack()
+            try:
+                await query.edit_message_text(
+                    report.med_card(med, lang),
+                    reply_markup=_med_card_keyboard(med, lang))
+            except Exception as exc:
+                if "not modified" not in str(exc):
+                    log.warning("Карточка приёма не обновилась: %s", exc)
             return
-        if action == "mt":
-            context.user_data.pop(f"med_opts:{med_id}", None)
+        if sub == "when":  # сетка «когда приняли»
+            context.user_data[f"medpanel:{med_id}"] = "when"
+            await ack()
+            ask = (t(lang, "med_ask_when", name=med.name) if med.name
+                   else t(lang, "med_ask_when_generic"))
+            title = report.med_card(med, lang) + "\n\n" + ask
+            try:
+                await query.edit_message_text(
+                    title, reply_markup=_med_when_keyboard(med, lang))
+            except Exception as exc:
+                if "not modified" not in str(exc):
+                    log.warning("Сетка «когда» не открылась: %s", exc)
+            return
+        if sub == "set":  # выбрано время приёма
+            minutes = _arg(parts, 3, MED_WHEN_OFFSETS)
+            if minutes is None:
+                await ack()
+                return
+            taken = db.utcnow() - timedelta(minutes=minutes)
+            db.set_med_time(user_id, med_id, taken, approx=minutes != 0)
+            context.user_data.pop(f"medpanel:{med_id}", None)
+            await ack()
+            await _send_med_card(update, context, db.get_med(user_id, med_id), lang)
+            return
+        if sub == "name":  # выбор названия из истории
+            names = db.recent_med_names(user_id)
+            context.user_data[f"medopts:{med_id}"] = list(names)
+            context.user_data[f"medpanel:{med_id}"] = "name"
+            await ack()
+            title = report.med_card(med, lang) + "\n\n" + t(lang, "med_pick_name")
+            try:
+                await query.edit_message_text(
+                    title, reply_markup=_med_name_keyboard(med, lang, names))
+            except Exception as exc:
+                if "not modified" not in str(exc):
+                    log.warning("Выбор названия не открылся: %s", exc)
+            return
+        if sub == "pick":  # название из снимка истории
+            names = context.user_data.get(f"medopts:{med_id}") or []
+            idx = _arg(parts, 3, range(len(names))) if names else None
+            if idx is None:
+                await ack(t(lang, "med_list_stale"))
+                return
+            db.set_med_name(user_id, med_id, names[idx])
+            context.user_data.pop(f"medopts:{med_id}", None)
+            context.user_data.pop(f"medpanel:{med_id}", None)
+            await ack(t(lang, "ack_saved"))
+            await _send_med_card(update, context, db.get_med(user_id, med_id), lang)
+            return
+        if sub == "type":  # ввести название вручную
             context.user_data["await"] = {"what": "med", "id": med_id}
             await ack()
-            await query.edit_message_text(t(lang, "med_name_prompt"))
+            await query.message.reply_text(t(lang, "med_name_prompt"))
             return
-        context.user_data.pop(f"med_opts:{med_id}", None)
-        db.delete_med(user_id, med_id)
-        await ack(t(lang, "ack_deleted"))
-        await query.edit_message_text(t(lang, "med_deleted"))
+        if sub == "del":  # подтверждение удаления (одноразовый токен)
+            token = secrets.token_urlsafe(4)
+            context.user_data[f"mdel:{med_id}"] = token
+            # Пауза тика: иначе через минуту он перерисует карточку поверх
+            # экрана подтверждения и кнопка «Удалить» исчезнет под пальцем.
+            context.user_data[f"medpanel:{med_id}"] = "del"
+            await ack()
+            try:
+                await query.edit_message_text(
+                    t(lang, "med_delete_confirm",
+                      name=med.name or t(lang, "med_unnamed"),
+                      time=report.hhmm(med.taken_at)),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(t(lang, "btn_back"),
+                                             callback_data=f"mc:back:{med_id}"),
+                        InlineKeyboardButton(t(lang, "btn_delete"),
+                                             callback_data=f"mc:dy:{med_id}:{token}"),
+                    ]]),
+                )
+            except Exception as exc:
+                log.warning("Подтверждение удаления приёма не показалось: %s", exc)
+            return
+        if sub == "dy":  # удаление подтверждено
+            context.user_data.pop(f"medpanel:{med_id}", None)
+            token = context.user_data.pop(f"mdel:{med_id}", None)
+            if not token or len(parts) < 4 or parts[3] != token:
+                await ack(t(lang, "forget_stale"))
+                return
+            _cancel_med_tick(context.job_queue, user_id, med_id)
+            db.delete_med(user_id, med_id)
+            await ack(t(lang, "ack_deleted"))
+            try:
+                await query.edit_message_text(t(lang, "med_deleted_card"))
+            except Exception:
+                pass
+            return
+        await ack()
         return
+
+    
 
     if action == "bf":  # ретроспективная запись: приступ, который уже прошёл
         sub = parts[1] if len(parts) > 1 else ""
@@ -1797,6 +2019,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         await ack()
         return
+
+    # --- действия над эпизодом ---
 
     # --- действия над эпизодом ---
     episode_id = _episode_id(parts)
@@ -2288,6 +2512,10 @@ async def post_init(app) -> None:
                 pass
         if caught:
             log.info("Расклеено забытых карточек: %s", caught)
+
+        # Тики карточек приёмов лекарств: как и у эпизодов, живут в памяти.
+        for med in db.meds_with_live_card(config.MED_TICK_MAX_H * 60):
+            _schedule_med_tick(app.job_queue, med.user_id, med.id, med.user_id)
 
     # Описания команд — на каждом языке плюс дефолтный набор для остальных.
     for lang in i18n.SUPPORTED:

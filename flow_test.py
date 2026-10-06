@@ -284,12 +284,16 @@ async def run() -> None:
     await tap("тяжело дышать, сижу")
     check("тяжело дышать" in (db.get_episode(uid, ep.id).note or ""), "текст стал заметкой")
 
-    # 7. Лекарство.
+    # 7. Лекарство: приём получает живую карточку. Истории ещё нет —
+    # карточка предлагает ввести название.
     await tap(t(LANG, "btn_med"))
-    med_id = db.list_meds(uid, db.utcnow().replace(hour=0, minute=0, second=0))[-1].id
-    await press(f"mt:{med_id}")
+    med_id = db.all_meds(uid)[-1].id
+    first_med = db.get_med(uid, med_id)
+    check(first_med.name is None, "без истории название не подставляется")
+    check(first_med.card_msg is not None, "у приёма есть живая карточка")
+    await press(f"mc:type:{med_id}")
     await tap("конкор")
-    check(db.all_meds(uid)[-1].name == "конкор", "название лекарства записано")
+    check(db.get_med(uid, med_id).name == "конкор", "название лекарства записано")
 
     # 8. Закрытие эпизода кнопкой на карточке.
     await press(f"e:{ep.id}")
@@ -615,19 +619,18 @@ async def run() -> None:
     db.add_med(uid, "препарат-А", db.utcnow() - timedelta(days=4))
     db.add_med(uid, "препарат-Б", db.utcnow() - timedelta(days=3))
     await bot.action_med(text_update(fake, t(LANG, "btn_med")), ctx2)
-    shown = [n for n in db.recent_med_names(uid) if n.startswith("препарат")]
     med_id = db.all_meds(uid)[-1].id
-    snapshot = ud2.get(f"med_opts:{med_id}") or []
-    check(snapshot == db.recent_med_names(uid),
-          "снимок равен тому списку, который человек увидел")
-    shown = snapshot
-    # Пока карточка висит, порядок в БД меняется
+    await bot.on_callback(callback_update(fake, f"mc:name:{med_id}"), ctx2)
+    shown = ud2.get(f"medopts:{med_id}") or []
+    check(shown == db.recent_med_names(uid),
+          "снимок названий равен показанному списку")
+    # Пока выбор открыт, порядок в БД меняется
     db.add_med(uid, shown[-1], db.utcnow())
     check(db.recent_med_names(uid) != shown, "порядок в БД успел измениться")
-    await bot.on_callback(callback_update(fake, f"mn:{med_id}:0"), ctx2)
-    saved = [m for m in db.all_meds(uid) if m.id == med_id][0]
+    await bot.on_callback(callback_update(fake, f"mc:pick:{med_id}:0"), ctx2)
+    saved = db.get_med(uid, med_id)
     check(saved.name == shown[0],
-          f"сохранено лекарство с нажатой кнопки ({saved.name!r} == {shown[0]!r})")
+          f"название — с нажатой кнопки, не из свежего списка ({saved.name!r} == {shown[0]!r})")
 
     # 19. Проверки состояния: сквозное поведение. Срабатывают два рубежа —
     # в боте и в SQL, и снаружи они неразличимы (это и есть смысл второго
@@ -1495,6 +1498,167 @@ async def run() -> None:
     # /cancel нет в меню команд — редкая и путает
     check("cancel" not in [c.command for c in bot._commands(LANG)],
           "/cancel убрана из списка команд")
+
+    # 19s. Карточка приёма лекарства: живой счётчик «принято N назад»,
+    # сетка «когда» с шагом 15 минут, дефолт названия, удаление с токеном.
+    db.add_med(uid, "конкор", db.utcnow())  # история не пуста → будет дефолт
+    db.add_med(uid, "конкор", db.utcnow())
+    expected_default = db.default_med_name(uid)
+    fake.sent.clear(); fake.markups.clear()
+    await tap(t(LANG, "btn_med"))
+    mcard = max(db.all_meds(uid), key=lambda m: m.id)
+    check(expected_default is not None and mcard.name == expected_default,
+          "название подставлено по умолчанию из истории")
+    check(mcard.card_msg is not None, "карточка приёма создана")
+    mtick = f"mtick:{uid}:{mcard.id}"
+    check(mtick in JQ.store, "счётчик карточки запущен")
+    check(any("принято только что" in m for m in fake.sent),
+          "свежий приём: «принято только что»")
+
+    # сетка «когда» — шаг 15 минут, «только что» = точно, остальное примерно
+    fake.markups.clear()
+    await press(f"mc:when:{mcard.id}")
+    when_btns = [b.callback_data for m in fake.markups if m
+                 for row in getattr(m, "inline_keyboard", []) for b in row
+                 if (b.callback_data or "").startswith("mc:set:")]
+    check(f"mc:set:{mcard.id}:15" in when_btns and f"mc:set:{mcard.id}:0" in when_btns,
+          "в сетке есть «только что» и шаг 15 минут")
+    await press(f"mc:set:{mcard.id}:120")
+    after = db.get_med(uid, mcard.id)
+    check(after.approx and int(after.since().total_seconds() // 60) == 120,
+          "приём сдвинут на 2 часа назад и помечен примерным")
+
+    # живой счётчик обновляет текст
+    fake.edited.clear()
+    tick_job = SimpleNamespace(data={"med_id": mcard.id}, user_id=uid, chat_id=uid,
+                               schedule_removal=lambda: None)
+    await bot._med_tick(SimpleNamespace(bot=fake, job=tick_job, job_queue=JQ, user_data=ud))
+    check(any("2 ч" in m and "назад" in m for m in fake.edited),
+          "счётчик показывает «принято 2 ч ... назад»")
+
+    # сменить название
+    await press(f"mc:name:{mcard.id}")
+    await press(f"mc:type:{mcard.id}")
+    await tap("аспирин")
+    check(db.get_med(uid, mcard.id).name == "аспирин", "название сменилось вводом")
+
+    # удаление — только с токеном
+    await press(f"mc:del:{mcard.id}")
+    mtok = ud.get(f"mdel:{mcard.id}")
+    check(mtok, "удаление приёма выдало одноразовый токен")
+    await press(f"mc:dy:{mcard.id}:подделка")
+    check(db.get_med(uid, mcard.id) is not None, "чужой токен приём не удалил")
+    ud[f"mdel:{mcard.id}"] = mtok
+    await press(f"mc:dy:{mcard.id}:{mtok}")
+    check(db.get_med(uid, mcard.id) is None, "по токену приём удалён")
+    check(mtick not in JQ.store, "и счётчик карточки остановлен")
+
+    # восстановление тика после рестарта
+    rec = db.add_med(uid, "конкор", db.utcnow())
+    db.set_med_card_msg(uid, rec.id, 9000)
+    JQ.store.clear()
+    await bot.post_init(SimpleNamespace(bot=fake, job_queue=JQ))
+    check(f"mtick:{uid}:{rec.id}" in JQ.store, "тик карточки приёма восстановлен после рестарта")
+    db.delete_med(uid, rec.id)
+
+    # 19t. Предохранители и починки приёма лекарств (ревью med-фичи).
+    # Чистим живые карточки от предыдущих блоков, чтобы счёт был предсказуем.
+    for m in db.live_med_cards(uid, cfg.MED_TICK_MAX_H * 60):
+        db.set_med_card_msg(uid, m.id, None)
+        bot._cancel_med_tick(JQ, uid, m.id)
+
+    # (a) BLOCKER: предел числа строк — у предела новый приём не создаётся,
+    # отказ объяснён словами (публичный бот, risk #5).
+    old_max = cfg.MAX_MEDS_PER_USER
+    cfg.MAX_MEDS_PER_USER = db.count_meds(uid)  # уже на пределе
+    try:
+        before = db.count_meds(uid)
+        fake.sent.clear()
+        await tap(t(LANG, "btn_med"))
+        check(db.count_meds(uid) == before, "у предела лекарств новый приём не создаётся")
+        check(any("предел" in m for m in fake.sent), "отказ по лимиту объяснён словами")
+    finally:
+        cfg.MAX_MEDS_PER_USER = old_max
+
+    # (b) BLOCKER: предел числа ЖИВЫХ карточек — гаснет счётчик у самой давней,
+    # но сама запись приёма остаётся (один тап = факт, запись не блокируется).
+    old_cap = cfg.MAX_LIVE_MED_CARDS
+    cfg.MAX_LIVE_MED_CARDS = 2
+    try:
+        base = db.utcnow()
+        made = []
+        for i in range(3):  # от старой к свежей
+            m = db.add_med(uid, "конкор", base - timedelta(minutes=10 * (3 - i)))
+            db.set_med_card_msg(uid, m.id, 7000 + i)
+            bot._schedule_med_tick(JQ, uid, m.id, uid)
+            made.append(m)
+        bot._enforce_live_med_cap(ctx, uid)
+        live_ids = {m.id for m in db.live_med_cards(uid, cfg.MED_TICK_MAX_H * 60)}
+        check(made[0].id not in live_ids, "самая давняя карточка погашена при переполнении")
+        check(made[1].id in live_ids and made[2].id in live_ids, "две свежие остаются живыми")
+        check(f"mtick:{uid}:{made[0].id}" not in JQ.store, "и тик давней карточки снят")
+        check(f"mtick:{uid}:{made[2].id}" in JQ.store, "тик свежей карточки жив")
+        check(db.get_med(uid, made[0].id) is not None, "но сама запись приёма сохранена")
+        for m in made:
+            db.set_med_card_msg(uid, m.id, None)
+            bot._cancel_med_tick(JQ, uid, m.id)
+            db.delete_med(uid, m.id)
+    finally:
+        cfg.MAX_LIVE_MED_CARDS = old_cap
+
+    # (c) Ревью #2: тик снимается по возрасту ДАЖЕ при открытой панели —
+    # иначе брошенная панель оставляла бы бессмертную ежеминутную задачу.
+    stuck = db.add_med(uid, "конкор", db.utcnow() - timedelta(hours=cfg.MED_TICK_MAX_H + 1))
+    db.set_med_card_msg(uid, stuck.id, 7777)
+    ud[f"medpanel:{stuck.id}"] = "when"
+    killed = {"v": False}
+    job = SimpleNamespace(data={"med_id": stuck.id}, user_id=uid, chat_id=uid,
+                          schedule_removal=lambda: killed.__setitem__("v", True))
+    await bot._med_tick(SimpleNamespace(bot=fake, job=job, job_queue=JQ, user_data=ud))
+    check(killed["v"], "старый тик снимается по возрасту даже при открытой панели")
+    ud.pop(f"medpanel:{stuck.id}", None)
+    db.delete_med(uid, stuck.id)
+
+    # (d) Ревью #3: экран подтверждения удаления переживает тик — mc:del ставит
+    # паузу, и ближайший тик ничего не перерисовывает поверх кнопки «Удалить».
+    delc = db.add_med(uid, "конкор", db.utcnow())
+    db.set_med_card_msg(uid, delc.id, 8888)
+    await press(f"mc:del:{delc.id}")
+    check(ud.get(f"medpanel:{delc.id}") == "del", "подтверждение удаления ставит паузу тика")
+    fake.edited.clear()
+    job = SimpleNamespace(data={"med_id": delc.id}, user_id=uid, chat_id=uid,
+                          schedule_removal=lambda: None)
+    await bot._med_tick(SimpleNamespace(bot=fake, job=job, job_queue=JQ, user_data=ud))
+    check(not fake.edited, "тик при открытом подтверждении удаления ничего не перерисовывает")
+    ud.pop(f"medpanel:{delc.id}", None)
+    db.delete_med(uid, delc.id)
+
+    # (e) Продукт S1: примерное время приёма попадает в CSV отдельным флагом,
+    # а не как точное (честность данных, как у end_approx эпизода).
+    csv_med = db.add_med(uid, "конкор", db.utcnow() - timedelta(minutes=120), approx=True)
+    csv_bytes = report.episodes_csv([], [db.get_med(uid, csv_med.id)], LANG).decode("utf-8")
+    med_line = [ln for ln in csv_bytes.splitlines() if "конкор" in ln][-1]
+    check(med_line.split(";")[6] == t(LANG, "csv_yes"),
+          "примерное время приёма помечено в колонке «примерная»")
+    exact_med = db.add_med(uid, "конкор", db.utcnow(), approx=False)
+    csv_bytes = report.episodes_csv([], [db.get_med(uid, exact_med.id)], LANG).decode("utf-8")
+    exact_line = [ln for ln in csv_bytes.splitlines() if "конкор" in ln][-1]
+    check(exact_line.split(";")[6] == "", "точное время приёма колонку не метит")
+    db.delete_med(uid, csv_med.id); db.delete_med(uid, exact_med.id)
+
+    # (f) Ревью #5: пустое имя не затирает заданное и не рисует «названную»
+    # раскладку. UX #1/#2: кнопки панели — нейтральные и без обрезки.
+    nam= db.add_med(uid, None, db.utcnow())
+    ud["await"] = {"what": "med", "id": nam.id}
+    await tap("   ")  # одни пробелы
+    check(db.get_med(uid, nam.id).name is None, "пустое имя не сохраняется")
+    when_kb = bot._med_when_keyboard(db.get_med(uid, nam.id), LANG)
+    labels = [b.text for row in when_kb.inline_keyboard for b in row]
+    check(all(i18n.utf16_len(x) <= 16 for x in labels),
+          "подписи сетки «когда» влезают в ряд по три (≤16)")
+    check(t(LANG, "btn_med_back") in labels and t(LANG, "btn_card") not in labels,
+          "в панели приёма нейтральная «Назад», а не «К эпизоду»")
+    db.delete_med(uid, nam.id)
 
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять

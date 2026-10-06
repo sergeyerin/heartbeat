@@ -21,7 +21,7 @@ import db  # noqa: E402
 import flow_test as harness  # noqa: E402
 import vocab  # noqa: E402
 
-ACTIONS = ("bf",
+ACTIONS = ("bf", "mc",
            "s", "p", "n", "nc", "nt", "m", "ts", "tt", "c", "e", "ro", "go", "apm",
            "ap", "unk", "sh", "d", "dy", "pc", "r", "csv", "dn", "nn", "nx", "np",
            "mn", "mt", "md", "lang", "fy", "noop", "", "zzz")

@@ -47,7 +47,9 @@ CREATE TABLE IF NOT EXISTS meds (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id  INTEGER NOT NULL,
     taken_at TEXT    NOT NULL,            -- UTC ISO
-    name     TEXT
+    name     TEXT,
+    approx   INTEGER NOT NULL DEFAULT 0,  -- 1 = время приёма указано примерно
+    card_msg INTEGER                      -- id сообщения с живой карточкой
 )
 """
 
@@ -134,6 +136,11 @@ class Med:
     user_id: int
     taken_at: datetime
     name: str | None = None
+    approx: bool = False
+    card_msg: int | None = None
+
+    def since(self, now: datetime | None = None) -> timedelta:
+        return (now or utcnow()) - self.taken_at
 
 
 def utcnow() -> datetime:
@@ -197,6 +204,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE episodes ADD COLUMN stale_shown INTEGER NOT NULL DEFAULT 0"
         )
+    med_cols = {row["name"] for row in conn.execute("PRAGMA table_info(meds)")}
+    if "approx" not in med_cols:
+        conn.execute("ALTER TABLE meds ADD COLUMN approx INTEGER NOT NULL DEFAULT 0")
+    if "card_msg" not in med_cols:
+        conn.execute("ALTER TABLE meds ADD COLUMN card_msg INTEGER")
 
 
 def _db() -> sqlite3.Connection:
@@ -712,14 +724,86 @@ def set_lang(user_id: int, lang: str) -> None:
 
 # --- лекарства -------------------------------------------------------------
 
-def add_med(user_id: int, name: str | None = None, taken_at: datetime | None = None) -> Med:
+def add_med(user_id: int, name: str | None = None, taken_at: datetime | None = None,
+            approx: bool = False) -> Med:
     taken = taken_at or utcnow()
     cur = _db().execute(
-        "INSERT INTO meds (user_id, taken_at, name) VALUES (?, ?, ?)",
-        (user_id, _iso(taken), name),
+        "INSERT INTO meds (user_id, taken_at, name, approx) VALUES (?, ?, ?, ?)",
+        (user_id, _iso(taken), name, 1 if approx else 0),
     )
     _db().commit()
-    return Med(id=cur.lastrowid, user_id=user_id, taken_at=taken, name=name)
+    return Med(id=cur.lastrowid, user_id=user_id, taken_at=taken, name=name, approx=approx)
+
+
+def set_med_time(user_id: int, med_id: int, taken_at: datetime, approx: bool) -> Med | None:
+    """Время приёма. В будущее не уедет (клампится к now)."""
+    taken = min(taken_at, utcnow())
+    _db().execute(
+        "UPDATE meds SET taken_at = ?, approx = ? WHERE id = ? AND user_id = ?",
+        (_iso(taken), 1 if approx else 0, med_id, user_id),
+    )
+    _db().commit()
+    return get_med(user_id, med_id)
+
+
+def set_med_card_msg(user_id: int, med_id: int, message_id: int | None) -> None:
+    _db().execute(
+        "UPDATE meds SET card_msg = ? WHERE id = ? AND user_id = ?",
+        (message_id, med_id, user_id),
+    )
+    _db().commit()
+
+
+def default_med_name(user_id: int) -> str | None:
+    """Самое частое лекарство пользователя — чтобы подставлять по умолчанию.
+    При равенстве — недавнее."""
+    row = _db().execute(
+        "SELECT name, COUNT(*) AS c, MAX(taken_at) AS last FROM meds "
+        "WHERE user_id = ? AND name IS NOT NULL AND name <> '' "
+        "GROUP BY name ORDER BY c DESC, last DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    return row["name"] if row else None
+
+
+def meds_with_live_card(within_min: int, limit: int = 500) -> list[Med]:
+    """Недавние приёмы с живой карточкой — для восстановления тика после
+    рестарта. Фильтр и LIMIT в SQL, как у эпизодов."""
+    cutoff = _iso(utcnow() - timedelta(minutes=within_min))
+    return [
+        _row_to_med(r)
+        for r in _db().execute(
+            "SELECT * FROM meds WHERE card_msg IS NOT NULL AND taken_at > ? "
+            "ORDER BY taken_at DESC LIMIT ?",
+            (cutoff, limit),
+        ).fetchall()
+    ]
+
+
+def count_meds(user_id: int) -> int:
+    return _db().execute(
+        "SELECT COUNT(*) FROM meds WHERE user_id = ?", (user_id,)
+    ).fetchone()[0]
+
+
+def live_med_cards(user_id: int, within_min: int) -> list[Med]:
+    """Свои приёмы с живой карточкой, от старых к новым — чтобы при
+    переполнении снять счётчик с самого давнего. Публичный однопроцессный
+    бот: число живых тиков на человека ограничено."""
+    cutoff = _iso(utcnow() - timedelta(minutes=within_min))
+    return [
+        _row_to_med(r)
+        for r in _db().execute(
+            "SELECT * FROM meds WHERE user_id = ? AND card_msg IS NOT NULL "
+            "AND taken_at > ? ORDER BY taken_at ASC, id ASC",
+            (user_id, cutoff),
+        ).fetchall()
+    ]
+
+
+def _row_to_med(r) -> Med:
+    return Med(id=r["id"], user_id=r["user_id"], taken_at=_parse(r["taken_at"]),
+               name=r["name"], approx=bool(r["approx"]), card_msg=r["card_msg"])
 
 
 def get_med(user_id: int, med_id: int) -> Med | None:
@@ -728,10 +812,7 @@ def get_med(user_id: int, med_id: int) -> Med | None:
     row = _db().execute(
         "SELECT * FROM meds WHERE id = ? AND user_id = ?", (med_id, user_id)
     ).fetchone()
-    if row is None:
-        return None
-    return Med(id=row["id"], user_id=row["user_id"], taken_at=_parse(row["taken_at"]),
-               name=row["name"])
+    return _row_to_med(row) if row else None
 
 
 def set_med_name(user_id: int, med_id: int, name: str) -> None:
@@ -755,14 +836,13 @@ def list_meds(user_id: int, since: datetime, until: datetime | None = None) -> l
         params.append(_iso(until))
     sql += " ORDER BY taken_at ASC, id ASC"
     return [
-        Med(id=r["id"], user_id=r["user_id"], taken_at=_parse(r["taken_at"]), name=r["name"])
-        for r in _db().execute(sql, params).fetchall()
+        _row_to_med(r) for r in _db().execute(sql, params).fetchall()
     ]
 
 
 def all_meds(user_id: int) -> list[Med]:
     return [
-        Med(id=r["id"], user_id=r["user_id"], taken_at=_parse(r["taken_at"]), name=r["name"])
+        _row_to_med(r)
         for r in _db().execute(
             "SELECT * FROM meds WHERE user_id = ? ORDER BY taken_at ASC, id ASC", (user_id,)
         ).fetchall()

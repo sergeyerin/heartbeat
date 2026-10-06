@@ -320,6 +320,27 @@ def period_report(days: int, episodes: list[Episode], meds: list[Med], lang: str
     return "\n".join(lines)
 
 
+# --- карточка приёма лекарства ---------------------------------------------
+
+def med_card(med: Med, lang: str) -> str:
+    """Живая карточка приёма: сколько времени прошло — чтобы знать, когда
+    принимать следующий раз. Бот интервал не знает и не подсказывает его —
+    только честно считает «принято N назад»."""
+    now = datetime.now(timezone.utc)
+    name = med.name or t(lang, "med_unnamed")
+    elapsed = med.since(now)
+    if elapsed < timedelta(minutes=1):
+        head = t(lang, "med_card_fresh", name=name)
+    else:
+        head = t(lang, "med_card_since", name=name,
+                 dur=human_duration(elapsed, lang))
+    when = t(lang, "med_card_when", day=_day_prefix(med.taken_at, lang),
+             time=hhmm(med.taken_at))
+    if med.approx:
+        when += t(lang, "med_card_approx")
+    return head + "\n" + when
+
+
 # --- экспорт ---------------------------------------------------------------
 
 def episodes_csv(episodes: list[Episode], meds: list[Med], lang: str) -> bytes:
@@ -351,7 +372,9 @@ def episodes_csv(episodes: list[Episode], meds: list[Med], lang: str) -> bytes:
         taken = local(med.taken_at)
         rows.append((med.taken_at, [
             t(lang, "csv_type_med"), med.id, taken.strftime("%Y-%m-%d"),
-            taken.strftime("%H:%M"), "", "", "", "", "", "", "", csv_safe(med.name or ""),
+            taken.strftime("%H:%M"), "", "",
+            t(lang, "csv_yes") if med.approx else "",
+            "", "", "", "", csv_safe(med.name or ""),
         ]))
     for _, row in sorted(rows, key=lambda item: item[0]):
         writer.writerow(row)
