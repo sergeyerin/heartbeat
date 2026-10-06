@@ -1520,32 +1520,49 @@ async def run() -> None:
     check(any("принято только что" in m for m in fake.sent),
           "свежий приём: «принято только что»")
 
-    # сетка «когда» — шаг 15 минут, «только что» = точно, остальное примерно
+    # сетка «когда» — «только что» = точно, сдвиги НАКОПИТЕЛЬНЫЕ
     fake.markups.clear()
     await press(f"mc:when:{mcard.id}")
     when_btns = [b.callback_data for m in fake.markups if m
                  for row in getattr(m, "inline_keyboard", []) for b in row
                  if (b.callback_data or "").startswith("mc:set:")]
-    check(f"mc:set:{mcard.id}:15" in when_btns and f"mc:set:{mcard.id}:0" in when_btns,
-          "в сетке есть «только что» и шаг 15 минут")
-    await press(f"mc:set:{mcard.id}:120")
+    check(f"mc:set:{mcard.id}:30" in when_btns and f"mc:set:{mcard.id}:0" in when_btns,
+          "в сетке есть «только что» и сдвиг −30")
+    await press(f"mc:set:{mcard.id}:30")
+    await press(f"mc:set:{mcard.id}:30")  # накопительно → −60, не идемпотентно
     after = db.get_med(uid, mcard.id)
-    check(after.approx and int(after.since().total_seconds() // 60) == 120,
-          "приём сдвинут на 2 часа назад и помечен примерным")
+    check(after.approx and int(after.since().total_seconds() // 60) == 60,
+          "два «−30» дают −60 (кнопки накопительные, а не идемпотентные)")
+    await press(f"mc:set:{mcard.id}:0")  # «только что» — сброс на сейчас
+    reset = db.get_med(uid, mcard.id)
+    check(not reset.approx and reset.since().total_seconds() < 90,
+          "«только что» сбрасывает время на сейчас и снимает «примерно»")
 
-    # живой счётчик обновляет текст
+    # живой счётчик обновляет текст (снова сдвинем на −60 двумя −30)
+    await press(f"mc:set:{mcard.id}:30")
+    await press(f"mc:set:{mcard.id}:30")
     fake.edited.clear()
     tick_job = SimpleNamespace(data={"med_id": mcard.id}, user_id=uid, chat_id=uid,
                                schedule_removal=lambda: None)
     await bot._med_tick(SimpleNamespace(bot=fake, job=tick_job, job_queue=JQ, user_data=ud))
-    check(any("2 ч" in m and "назад" in m for m in fake.edited),
-          "счётчик показывает «принято 2 ч ... назад»")
+    check(any("1 ч" in m and "назад" in m for m in fake.edited),
+          "счётчик показывает «принято 1 ч ... назад»")
 
     # сменить название
     await press(f"mc:name:{mcard.id}")
+    fake.sent.clear(); fake.answers.clear()
     await press(f"mc:type:{mcard.id}")
+    check(not any("Напишите название" in m for m in fake.sent),
+          "подсказка ввода названия — не сообщением в чат")
+    check(any("Напишите название" in a for a in fake.answers),
+          "подсказка ввода названия показана всплывашкой (а не пропала)")
+    fake.edited.clear(); fake.sent.clear()
     await tap("аспирин")
     check(db.get_med(uid, mcard.id).name == "аспирин", "название сменилось вводом")
+    check(any("аспирин" in e for e in fake.edited),
+          "карточка после ввода имени правится НА МЕСТЕ (в edited)")
+    check(not any("принято" in s and "аспирин" in s for s in fake.sent),
+          "и не дублируется новым сообщением (карточки нет в sent)")
 
     # удаление — только с токеном
     await press(f"mc:del:{mcard.id}")
@@ -1566,18 +1583,29 @@ async def run() -> None:
     check(f"mtick:{uid}:{rec.id}" in JQ.store, "тик карточки приёма восстановлен после рестарта")
     db.delete_med(uid, rec.id)
 
-    # 19s2. «💊 Лекарство» возвращает нижнюю плашку: карточка инлайновая, а меню
-    # ездит только на reply-клавиатуре — иначе во время работы с карточками оно
-    # пропадало. Плашка идёт отдельным сообщением, карточка — следом (последней).
+    # 19s2. Чистота чата: нажатие кнопки «💊 Лекарство» не плодит подтверждение
+    # (меню и так видно — его только что нажали), а команда /med прячет меню
+    # набором текста и потому возвращает его отдельной репликой с плашкой.
+    plate_type = type(bot.main_keyboard(True, LANG))
+
+    def _drop_newest_med():
+        m = max(db.live_med_cards(uid, cfg.MED_TICK_MAX_H * 60), key=lambda x: x.id)
+        bot._cancel_med_tick(JQ, uid, m.id)
+        db.set_med_card_msg(uid, m.id, None)
+        db.delete_med(uid, m.id)
+
     fake.markups.clear(); fake.sent.clear()
     await tap(t(LANG, "btn_med"))
-    plate_type = type(bot.main_keyboard(True, LANG))
-    check(any(isinstance(m, plate_type) for m in fake.markups),
-          "нажатие «💊 Лекарство» возвращает нижнюю плашку")
-    last_live = max(db.live_med_cards(uid, cfg.MED_TICK_MAX_H * 60), key=lambda m: m.id)
-    db.set_med_card_msg(uid, last_live.id, None)
-    bot._cancel_med_tick(JQ, uid, last_live.id)
-    db.delete_med(uid, last_live.id)
+    check(not any("Записал приём" in m for m in fake.sent),
+          "кнопка «💊 Лекарство» не шлёт лишнее подтверждение «Записал приём»")
+    _drop_newest_med()
+
+    fake.markups.clear(); fake.sent.clear()
+    await bot.action_med(text_update(fake, "/med"), ctx)
+    check(any(isinstance(m, plate_type) for m in fake.markups)
+          and any("Записал приём" in m for m in fake.sent),
+          "/med (команда) возвращает плашку подтверждением")
+    _drop_newest_med()
 
     # 19t. Предохранители и починки приёма лекарств (ревью med-фичи).
     # Чистим живые карточки от предыдущих блоков, чтобы счёт был предсказуем.
@@ -1731,7 +1759,7 @@ async def run() -> None:
     ud.pop(f"medopts:{flatm.id}", None)
     kb = bot._med_card_markup(ctx, db.get_med(uid, flatm.id), LANG)
     cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
-    check(f"mc:set:{flatm.id}:0" in cbs and f"mc:set:{flatm.id}:120" in cbs,
+    check(f"mc:set:{flatm.id}:0" in cbs and f"mc:set:{flatm.id}:30" in cbs,
           "сдвиги времени стоят прямо на карточке")
     check(f"mc:when:{flatm.id}" not in cbs and f"mc:name:{flatm.id}" not in cbs,
           "на новой карточке нет кнопок-подменю «Когда»/«Название»")

@@ -63,10 +63,10 @@ SHIFT_CHOICES = (5, 15, 30)
 # (15–30) или «уснул, увлёкся» (45–90), и 45 набирается двумя нажатиями.
 END_SHIFT_CHOICES = (15, 30, 60)
 
-# Сетка «когда приняли лекарство»: шаг 15 минут вблизи (где важно для «когда
-# следующий раз»), крупнее дальше. «только что» = точное время, остальное —
-# примерно.
-MED_WHEN_OFFSETS = (0, 15, 30, 45, 60, 90, 120, 180, 240, 360)
+# Сдвиги времени приёма. Кнопки НАКОПИТЕЛЬНЫЕ: «−15» дважды = −30, поэтому
+# их мало — остальное набирается повторными нажатиями. 0 = «только что»
+# (сброс на точное сейчас).
+MED_WHEN_OFFSETS = (0, 5, 15, 30, 60)
 MED_NAME_BUTTONS = 3  # сколько недавних названий показываем прямо на карточке
 MED_ALL_LIMIT = 50    # потолок полного справочника названий (кнопки Telegram)
 
@@ -1480,15 +1480,14 @@ async def action_med(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     default_name = db.default_med_name(user_id)
     med = db.add_med(user_id, name=default_name, taken_at=update.message.date)
-    # Плашку держим отдельным коротким сообщением, как у эпизода: карточка
-    # несёт инлайн-клавиатуру, а нижнее меню умеет ехать только на reply-
-    # клавиатуре. Без этого во время работы только с карточками приёма плашка
-    # уезжала — «пропало меню снизу». Карточка идёт следом и остаётся
-    # последним сообщением.
-    await update.message.reply_text(
-        t(lang, "med_logged", time=report.hhmm(med.taken_at)),
-        reply_markup=main_keyboard(_active(user_id) is not None, lang),
-    )
+    # Плашку возвращаем ТОЛЬКО если приём пришёл командой (/med): набор текста
+    # прячет нижнее меню. Нажатие кнопки «💊 Лекарство» меню не прячет (чтобы её
+    # нажать, оно было видно) — тогда отдельное подтверждение лишь мусор в чате.
+    if update.message.text not in ACTION_BY_TEXT:
+        await update.message.reply_text(
+            t(lang, "med_logged", time=report.hhmm(med.taken_at)),
+            reply_markup=main_keyboard(_active(user_id) is not None, lang),
+        )
     await _send_med_card(update, context, med, lang)
     _retire_same_name(context, user_id, med)
     _enforce_live_med_cap(context, user_id)
@@ -1646,11 +1645,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if name:  # пустое имя не затирает уже заданное и не рисует
                 db.set_med_name(user_id, target_id, name)  # «названную» раскладку
             med = db.get_med(user_id, target_id)
-            await _send_med_card(update, context, med, lang, force_new=True)
+            # Карточку правим НА МЕСТЕ (не дублируем новым сообщением), а плашку
+            # досылаем одной короткой репликой: набор текста её спрятал, а
+            # инлайн-карточка не возвращает. Это единственное новое сообщение.
+            await _send_med_card(update, context, med, lang)
             _retire_same_name(context, user_id, med)
-            # Ввод текста прячет нижнюю плашку за системной клавиатурой, а
-            # инлайн-карточка её не возвращает — поэтому плашку досылаем
-            # последним сообщением (как у эпизода после ввода пульса/заметки).
             await update.message.reply_text(
                 t(lang, "med_saved", name=med.name or t(lang, "med_unnamed")),
                 reply_markup=main_keyboard(_active(user_id) is not None, lang))
@@ -1925,13 +1924,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 if "not modified" not in str(exc):
                     log.warning("Сетка «когда» не открылась: %s", exc)
             return
-        if sub == "set":  # выбрано время приёма
+        if sub == "set":  # сдвиг времени приёма (накопительно)
             minutes = _arg(parts, 3, MED_WHEN_OFFSETS)
             if minutes is None:
                 await ack()
                 return
-            taken = db.utcnow() - timedelta(minutes=minutes)
-            db.set_med_time(user_id, med_id, taken, approx=minutes != 0)
+            if minutes == 0:
+                taken, approx = db.utcnow(), False  # «только что» — сброс на сейчас
+            else:
+                # Вычитаем из ТЕКУЩЕГО времени приёма, а не из «сейчас»: два
+                # нажатия «−15» дают −30. set_med_time зажмёт будущее к now.
+                taken, approx = med.taken_at - timedelta(minutes=minutes), True
+            db.set_med_time(user_id, med_id, taken, approx=approx)
             context.user_data.pop(f"medpanel:{med_id}", None)
             await ack()
             await _send_med_card(update, context, db.get_med(user_id, med_id), lang)
@@ -1985,8 +1989,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         if sub == "type":  # ввести название вручную
             context.user_data["await"] = {"what": "med", "id": med_id}
-            await ack()
-            await query.message.reply_text(t(lang, "med_name_prompt"))
+            # Подсказка всплывашкой, а не сообщением: экран приёма и так зовёт
+            # печатать, а лишняя реплика в чате — мусор.
+            await ack(t(lang, "med_name_prompt"))
             return
         if sub == "del":  # подтверждение удаления (одноразовый токен)
             token = secrets.token_urlsafe(4)
