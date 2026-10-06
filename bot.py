@@ -68,6 +68,7 @@ END_SHIFT_CHOICES = (15, 30, 60)
 # примерно.
 MED_WHEN_OFFSETS = (0, 15, 30, 45, 60, 90, 120, 180, 240, 360)
 MED_NAME_BUTTONS = 3  # сколько недавних названий показываем прямо на карточке
+MED_ALL_LIMIT = 50    # потолок полного справочника названий (кнопки Telegram)
 
 # Ретроспективная запись. Состояние потока живёт в payload кнопки, а не в
 # user_data: `bf:f:2:23:40:30` — 15 байт из 64 доступных, переживает рестарт,
@@ -885,16 +886,21 @@ def _med_offset_buttons(med: db.Med, lang: str) -> list[InlineKeyboardButton]:
     return out
 
 
-def _med_card_keyboard(med: db.Med, lang: str, names: "list[str] | tuple" = ()
-                       ) -> InlineKeyboardMarkup:
+def _med_card_keyboard(med: db.Med, lang: str, names: "list[str] | tuple" = (),
+                       has_more: bool = False) -> InlineKeyboardMarkup:
     """Карточка приёма: сдвиги времени и недавние названия стоят ПРЯМО на ней —
-    без захода в подменю. `names` — снимок недавних названий (его индексы адресует
-    `mc:pick`); сохранить снимок обязан вызывающий (`_med_card_markup`)."""
+    без захода в подменю. `names` — снимок показанных названий (его индексы
+    адресует `mc:pick`), сохранить снимок обязан вызывающий (`_med_card_markup`).
+    `has_more` → кнопка «📋 Все лекарства» (полный справочник из истории)."""
     offs = _med_offset_buttons(med, lang)
     rows = [offs[i:i + 3] for i in range(0, len(offs), 3)]
     if names:
         rows.append([InlineKeyboardButton(n, callback_data=f"mc:pick:{med.id}:{i}")
                      for i, n in enumerate(names)])
+        if has_more:
+            # Свой ряд, во всю ширину: подпись длинная, в паре обрезалась бы.
+            rows.append([InlineKeyboardButton(t(lang, "btn_med_all"),
+                                              callback_data=f"mc:all:{med.id}")])
         rows.append([InlineKeyboardButton(t(lang, "btn_med_type"),
                                           callback_data=f"mc:type:{med.id}")])
     else:
@@ -911,11 +917,24 @@ def _med_card_markup(context: ContextTypes.DEFAULT_TYPE, med: db.Med,
     """Клавиатура карточки + снимок названий в user_data. Снимок и показанные
     кнопки строятся ВМЕСТЕ на каждой перерисовке (в том числе в тике), поэтому
     индекс из `mc:pick` всегда адресует то название, что видно сейчас, — тот же
-    приём от гонки порядка, что был у подменю, но на живой карточке."""
-    names = db.recent_med_names(med.user_id, MED_NAME_BUTTONS)
+    приём от гонки порядка, что был у подменю, но на живой карточке. Берём на
+    одно название больше, чем показываем: лишнее означает «есть ещё» → кнопка
+    «📋 Все лекарства»."""
+    names = db.recent_med_names(med.user_id, MED_NAME_BUTTONS + 1)
+    shown = names[:MED_NAME_BUTTONS]
     if context.user_data is not None:
-        context.user_data[f"medopts:{med.id}"] = list(names)
-    return _med_card_keyboard(med, lang, names)
+        context.user_data[f"medopts:{med.id}"] = list(shown)
+    return _med_card_keyboard(med, lang, shown, has_more=len(names) > MED_NAME_BUTTONS)
+
+
+def _med_all_keyboard(med: db.Med, lang: str, names: list[str]) -> InlineKeyboardMarkup:
+    """Полный справочник названий из истории — по одному в ряд (их читают, а не
+    ищут), плюс ручной ввод нового и возврат к карточке."""
+    rows = [[InlineKeyboardButton(n, callback_data=f"mc:pick:{med.id}:{i}")]
+            for i, n in enumerate(names)]
+    rows.append([InlineKeyboardButton(t(lang, "btn_med_type"), callback_data=f"mc:type:{med.id}")])
+    rows.append([InlineKeyboardButton(t(lang, "btn_med_back"), callback_data=f"mc:back:{med.id}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _med_when_keyboard(med: db.Med, lang: str) -> InlineKeyboardMarkup:
@@ -1932,6 +1951,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             except Exception as exc:
                 if "not modified" not in str(exc):
                     log.warning("Выбор названия не открылся: %s", exc)
+            return
+        if sub == "all":  # полный справочник названий из истории
+            names = db.recent_med_names(user_id, MED_ALL_LIMIT)
+            context.user_data[f"medopts:{med_id}"] = list(names)
+            context.user_data[f"medpanel:{med_id}"] = "all"
+            # Экран приглашает и печатать новое название — ловим ввод.
+            context.user_data["await"] = {"what": "med", "id": med_id}
+            await ack()
+            title = report.med_card(med, lang) + "\n\n" + t(lang, "med_pick_name")
+            try:
+                await query.edit_message_text(
+                    title, reply_markup=_med_all_keyboard(med, lang, names))
+            except Exception as exc:
+                if "not modified" not in str(exc):
+                    log.warning("Справочник названий не открылся: %s", exc)
             return
         if sub == "pick":  # название из снимка истории
             names = (context.user_data.get(f"medopts:{med_id}")

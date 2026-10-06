@@ -312,6 +312,7 @@ STRINGS: dict[str, dict[str, str]] = {
     "btn_med_ago": {"ru": "−{dur}", "en": "−{dur}"},
     "btn_med_type": {"ru": "✏️ Другое", "en": "✏️ Other"},
     "btn_med_back": {"ru": "← Назад", "en": "← Back"},
+    "btn_med_all": {"ru": "📋 Все лекарства", "en": "📋 All medications"},
     "med_ask_when_generic": {"ru": "Когда приняли лекарство?",
                              "en": "When did you take it?"},
     "too_many_meds": {

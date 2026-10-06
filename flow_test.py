@@ -1775,6 +1775,43 @@ async def run() -> None:
     bot._cancel_med_tick(JQ, uid, newc.id)
     db.delete_med(uid, oldc.id); db.delete_med(uid, newc.id)
 
+    # 19x. Справочник из истории: «📋 Все лекарства» открывает полный список,
+    # выбор — кнопкой (печать только для нового препарата). Тик на паузе, пока
+    # открыт справочник.
+    for nm in ("апре", "бпре", "впре", "гпре"):
+        db.add_med(uid, nm, db.utcnow())
+    allm = db.add_med(uid, None, db.utcnow())
+    ud.pop(f"medopts:{allm.id}", None); ud.pop(f"medpanel:{allm.id}", None)
+    kb = bot._med_card_markup(ctx, db.get_med(uid, allm.id), LANG)
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+    check(f"mc:all:{allm.id}" in cbs, "при >3 названиях на карточке есть «Все лекарства»")
+    picks_on_card = [c for c in cbs if c.startswith(f"mc:pick:{allm.id}:")]
+    check(len(picks_on_card) == 3, "на самой карточке по-прежнему только 3 названия")
+    await bot.on_callback(callback_update(fake, f"mc:all:{allm.id}"), ctx)
+    check(ud.get(f"medpanel:{allm.id}") == "all", "«Все лекарства» ставит паузу тика")
+    full = ud.get(f"medopts:{allm.id}") or []
+    check(len(full) > 3, f"в справочнике больше 3 названий (их {len(full)})")
+    db.set_med_card_msg(uid, allm.id, 5151)
+    fake.edited.clear()
+    job = SimpleNamespace(data={"med_id": allm.id}, user_id=uid, chat_id=uid,
+                          schedule_removal=lambda: None)
+    await bot._med_tick(SimpleNamespace(bot=fake, job=job, job_queue=JQ, user_data=ud))
+    check(not fake.edited, "пока открыт справочник, тик карточку не трогает")
+    target = full[-1]  # есть только в полном списке, не в тройке на карточке
+    await bot.on_callback(callback_update(fake, f"mc:pick:{allm.id}:{full.index(target)}"), ctx)
+    check(db.get_med(uid, allm.id).name == target, "выбор из справочника ставит название")
+    check("await" not in ud and f"medpanel:{allm.id}" not in ud,
+          "после выбора пауза и ожидание ввода сняты")
+    bot._cancel_med_tick(JQ, uid, allm.id)
+    db.delete_med(uid, allm.id)
+    u2 = 770088
+    db.add_med(u2, "альфа", db.utcnow()); db.add_med(u2, "бета", db.utcnow())
+    m2 = db.add_med(u2, None, db.utcnow())
+    kb2 = bot._med_card_markup(make_context(fake, {}), db.get_med(u2, m2.id), LANG)
+    cbs2 = [b.callback_data for row in kb2.inline_keyboard for b in row]
+    check(f"mc:all:{m2.id}" not in cbs2, "при ≤3 названиях «Все лекарства» не показываем")
+    db.delete_med(u2, m2.id)
+
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять
     if db.last_episode(uid) is None:
