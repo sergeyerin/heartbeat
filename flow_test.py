@@ -1840,6 +1840,41 @@ async def run() -> None:
     check(f"mc:all:{m2.id}" not in cbs2, "при ≤3 названиях «Все лекарства» не показываем")
     db.delete_med(u2, m2.id)
 
+    # 19y. Карточка приёма замерзает через окно: правки убираются (остаётся
+    # удаление), а старые кнопки из истории отклоняются вторым рубежом.
+    frz = db.add_med(uid, "конкор", db.utcnow())
+    check(bot._med_editable(db.get_med(uid, frz.id)), "свежая карточка — редактируемая")
+    cbs_live = [b.callback_data for row in
+                bot._med_card_markup(ctx, db.get_med(uid, frz.id), LANG).inline_keyboard
+                for b in row]
+    check(any(c.startswith(f"mc:set:{frz.id}:") for c in cbs_live),
+          "на свежей карточке есть кнопки правок")
+
+    past = db.utcnow() - timedelta(minutes=cfg.MED_EDIT_WINDOW_MIN + 1)
+    db._db().execute("UPDATE meds SET modified_at = ? WHERE id = ?", (db._iso(past), frz.id))
+    db._db().commit()
+    check(not bot._med_editable(db.get_med(uid, frz.id)), "за окном карточка не редактируется")
+    cbs_frozen = [b.callback_data for row in
+                  bot._med_card_markup(ctx, db.get_med(uid, frz.id), LANG).inline_keyboard
+                  for b in row]
+    check(cbs_frozen == [f"mc:del:{frz.id}"], "замороженная карточка — только «Удалить»")
+
+    before_time = db.get_med(uid, frz.id).taken_at
+    fake.answers.clear()
+    await press(f"mc:set:{frz.id}:30")
+    check(db.get_med(uid, frz.id).taken_at == before_time,
+          "сдвиг времени на замороженной карточке отклонён (второй рубеж)")
+    check(any("не изменить" in a for a in fake.answers), "отказ объяснён всплывашкой")
+    ud.pop("await", None)
+    await press(f"mc:type:{frz.id}")
+    check((ud.get("await") or {}).get("id") != frz.id,
+          "ручной ввод названия на замороженной не запускается")
+
+    await press(f"mc:del:{frz.id}")
+    check(ud.get(f"mdel:{frz.id}"), "удаление на замороженной карточке остаётся доступным")
+    await press(f"mc:dy:{frz.id}:{ud[f'mdel:{frz.id}']}")
+    check(db.get_med(uid, frz.id) is None, "замороженную карточку можно удалить")
+
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять
     if db.last_episode(uid) is None:

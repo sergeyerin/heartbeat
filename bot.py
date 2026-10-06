@@ -68,6 +68,7 @@ END_SHIFT_CHOICES = (15, 30, 60)
 # (сброс на точное сейчас).
 MED_WHEN_OFFSETS = (0, 5, 15, 30, 60)
 MED_NAME_BUTTONS = 3  # сколько недавних названий показываем прямо на карточке
+_MED_EDIT_SUBS = frozenset({"when", "set", "name", "all", "pick", "type"})
 MED_ALL_LIMIT = 50    # потолок полного справочника названий (кнопки Telegram)
 
 # Ретроспективная запись. Состояние потока живёт в payload кнопки, а не в
@@ -867,6 +868,14 @@ def _schedule_reminder(job_queue, user_id: int, episode_id: int,
     )
 
 
+def _med_editable(med: db.Med) -> bool:
+    """Можно ли ещё править карточку приёма. Через MED_EDIT_WINDOW_MIN минут
+    после последней правки остаётся только удаление — инлайн-кнопки живут в
+    истории чата вечно, и старую запись иначе поправили бы случайно."""
+    base = med.modified_at or med.taken_at
+    return db.utcnow() - base < timedelta(minutes=config.MED_EDIT_WINDOW_MIN)
+
+
 def _med_offset_buttons(med: db.Med, lang: str) -> list[InlineKeyboardButton]:
     """Кнопки сдвига времени приёма. «только что» = точное время (approx=0),
     поэтому у свежей карточки оно помечено «● » (точка = выбранное, как у тяжести);
@@ -887,11 +896,16 @@ def _med_offset_buttons(med: db.Med, lang: str) -> list[InlineKeyboardButton]:
 
 
 def _med_card_keyboard(med: db.Med, lang: str, names: "list[str] | tuple" = (),
-                       has_more: bool = False) -> InlineKeyboardMarkup:
+                       has_more: bool = False, editable: bool = True
+                       ) -> InlineKeyboardMarkup:
     """Карточка приёма: сдвиги времени и недавние названия стоят ПРЯМО на ней —
     без захода в подменю. `names` — снимок показанных названий (его индексы
     адресует `mc:pick`), сохранить снимок обязан вызывающий (`_med_card_markup`).
-    `has_more` → кнопка «📋 Все лекарства» (полный справочник из истории)."""
+    `has_more` → кнопка «📋 Все лекарства» (полный справочник из истории).
+    `editable=False` замораживает карточку: только «🗑 Удалить»."""
+    if not editable:
+        return InlineKeyboardMarkup([[InlineKeyboardButton(
+            t(lang, "btn_delete"), callback_data=f"mc:del:{med.id}")]])
     offs = _med_offset_buttons(med, lang)
     rows = [offs[i:i + 3] for i in range(0, len(offs), 3)]
     if names:
@@ -920,11 +934,14 @@ def _med_card_markup(context: ContextTypes.DEFAULT_TYPE, med: db.Med,
     приём от гонки порядка, что был у подменю, но на живой карточке. Берём на
     одно название больше, чем показываем: лишнее означает «есть ещё» → кнопка
     «📋 Все лекарства»."""
+    if not _med_editable(med):
+        return _med_card_keyboard(med, lang, editable=False)
     names = db.recent_med_names(med.user_id, MED_NAME_BUTTONS + 1)
     shown = names[:MED_NAME_BUTTONS]
     if context.user_data is not None:
         context.user_data[f"medopts:{med.id}"] = list(shown)
-    return _med_card_keyboard(med, lang, shown, has_more=len(names) > MED_NAME_BUTTONS)
+    return _med_card_keyboard(med, lang, shown,
+                              has_more=len(names) > MED_NAME_BUTTONS, editable=True)
 
 
 def _med_all_keyboard(med: db.Med, lang: str, names: list[str]) -> InlineKeyboardMarkup:
@@ -1898,6 +1915,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         med = db.get_med(user_id, med_id) if med_id is not None else None
         if med is None:
             await ack()
+            return
+        # Правки заморожены через окно — пропускаем только удаление и возврат.
+        # Второй рубеж к замороженной клавиатуре: кнопка из истории недоверенная.
+        if sub in _MED_EDIT_SUBS and not _med_editable(med):
+            await ack(t(lang, "med_locked"))
             return
         if sub == "back":  # вернуться к карточке
             context.user_data.pop(f"medpanel:{med_id}", None)

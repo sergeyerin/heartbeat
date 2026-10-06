@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS meds (
     taken_at TEXT    NOT NULL,            -- UTC ISO
     name     TEXT,
     approx   INTEGER NOT NULL DEFAULT 0,  -- 1 = время приёма указано примерно
-    card_msg INTEGER                      -- id сообщения с живой карточкой
+    card_msg INTEGER,                     -- id сообщения с живой карточкой
+    modified_at TEXT                      -- UTC ISO: когда карточку последний раз правили
 )
 """
 
@@ -138,6 +139,7 @@ class Med:
     name: str | None = None
     approx: bool = False
     card_msg: int | None = None
+    modified_at: datetime | None = None
 
     def since(self, now: datetime | None = None) -> timedelta:
         return (now or utcnow()) - self.taken_at
@@ -209,6 +211,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE meds ADD COLUMN approx INTEGER NOT NULL DEFAULT 0")
     if "card_msg" not in med_cols:
         conn.execute("ALTER TABLE meds ADD COLUMN card_msg INTEGER")
+    if "modified_at" not in med_cols:
+        conn.execute("ALTER TABLE meds ADD COLUMN modified_at TEXT")
 
 
 def _db() -> sqlite3.Connection:
@@ -727,20 +731,24 @@ def set_lang(user_id: int, lang: str) -> None:
 def add_med(user_id: int, name: str | None = None, taken_at: datetime | None = None,
             approx: bool = False) -> Med:
     taken = taken_at or utcnow()
+    now = utcnow()  # modified_at — момент правки (создания), не время приёма
     cur = _db().execute(
-        "INSERT INTO meds (user_id, taken_at, name, approx) VALUES (?, ?, ?, ?)",
-        (user_id, _iso(taken), name, 1 if approx else 0),
+        "INSERT INTO meds (user_id, taken_at, name, approx, modified_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (user_id, _iso(taken), name, 1 if approx else 0, _iso(now)),
     )
     _db().commit()
-    return Med(id=cur.lastrowid, user_id=user_id, taken_at=taken, name=name, approx=approx)
+    return Med(id=cur.lastrowid, user_id=user_id, taken_at=taken, name=name,
+               approx=approx, modified_at=now)
 
 
 def set_med_time(user_id: int, med_id: int, taken_at: datetime, approx: bool) -> Med | None:
     """Время приёма. В будущее не уедет (клампится к now)."""
     taken = min(taken_at, utcnow())
     _db().execute(
-        "UPDATE meds SET taken_at = ?, approx = ? WHERE id = ? AND user_id = ?",
-        (_iso(taken), 1 if approx else 0, med_id, user_id),
+        "UPDATE meds SET taken_at = ?, approx = ?, modified_at = ? "
+        "WHERE id = ? AND user_id = ?",
+        (_iso(taken), 1 if approx else 0, _iso(utcnow()), med_id, user_id),
     )
     _db().commit()
     return get_med(user_id, med_id)
@@ -803,7 +811,8 @@ def live_med_cards(user_id: int, within_min: int) -> list[Med]:
 
 def _row_to_med(r) -> Med:
     return Med(id=r["id"], user_id=r["user_id"], taken_at=_parse(r["taken_at"]),
-               name=r["name"], approx=bool(r["approx"]), card_msg=r["card_msg"])
+               name=r["name"], approx=bool(r["approx"]), card_msg=r["card_msg"],
+               modified_at=_parse(r["modified_at"]))
 
 
 def get_med(user_id: int, med_id: int) -> Med | None:
@@ -817,7 +826,8 @@ def get_med(user_id: int, med_id: int) -> Med | None:
 
 def set_med_name(user_id: int, med_id: int, name: str) -> None:
     _db().execute(
-        "UPDATE meds SET name = ? WHERE id = ? AND user_id = ?", (name, med_id, user_id)
+        "UPDATE meds SET name = ?, modified_at = ? WHERE id = ? AND user_id = ?",
+        (name, _iso(utcnow()), med_id, user_id),
     )
     _db().commit()
 

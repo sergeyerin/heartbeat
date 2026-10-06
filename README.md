@@ -252,6 +252,7 @@ Things worth knowing:
 | `STALE_AFTER_MIN` | two windows (`60`) | minutes of silence that mean "no end time" |
 | `CARD_TICK_SEC` | `60` | how often the card of an ongoing episode is redrawn (0 — never) |
 | `MED_TICK_MAX_H` | `24` | how many hours a medication card keeps counting before its tick stops |
+| `MED_EDIT_WINDOW_MIN` | `5` | minutes after the last edit before a medication card freezes (edit buttons drop, only delete stays) |
 | `MAX_EPISODES_PER_USER` | `5000` | cap on episodes per person |
 | `MAX_OPEN_EPISODES` | `10` | cap on unclosed episodes per person |
 | `MAX_MEDS_PER_USER` | `5000` | cap on medication entries per person |
