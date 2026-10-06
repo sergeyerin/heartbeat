@@ -1876,6 +1876,39 @@ async def run() -> None:
     await press(f"mc:dy:{frz.id}:{ud[f'mdel:{frz.id}']}")
     check(db.get_med(uid, frz.id) is None, "замороженную карточку можно удалить")
 
+    # 19z. БАГ с живого использования: пустая история → тап «💊 Лекарство» →
+    # печатаешь название СРАЗУ (без нажатия «🏷 Название»). Раньше текст уходил
+    # в «записать это как новый эпизод?»; теперь приём без имени сам встаёт в
+    # ожидание и явно просит название.
+    for m in db.all_meds(uid):
+        bot._cancel_med_tick(JQ, uid, m.id)
+        db.delete_med(uid, m.id)
+    check(db.default_med_name(uid) is None, "истории приёмов нет — дефолта нет")
+    while bot._current_episode(uid) is not None:
+        cur = bot._current_episode(uid)
+        db.close_episode(uid, cur.id)
+        age_out(uid, cur.id, days=3)
+    ud.pop("await", None)
+    fake.sent.clear()
+    await tap(t(LANG, "btn_med"))
+    nm = max(db.all_meds(uid), key=lambda m: m.id)
+    check(nm.name is None, "без истории приём создан без названия")
+    check(ud.get("await") == {"what": "med", "id": nm.id},
+          "безымянный приём СРАЗУ ждёт название (без нажатия «🏷 Название»)")
+    check(any("Напишите название" in s for s in fake.sent),
+          "и явно просит ввести название")
+    eps_before = db.count_episodes(uid)
+    fake.sent.clear()
+    await tap("Глицин")  # печатаем имя сразу
+    check(db.get_med(uid, nm.id).name == "Глицин",
+          "набранное сразу имя становится названием приёма")
+    check(db.count_episodes(uid) == eps_before,
+          "и НЕ создаёт новый эпизод (это был баг)")
+    check(not any(t(LANG, "ask_text_as_episode") in s for s in fake.sent),
+          "и не предлагает «записать это как новый эпизод»")
+    bot._cancel_med_tick(JQ, uid, nm.id)
+    db.delete_med(uid, nm.id)
+
     # 20. Удаление с подтверждением.
     # После /forget дневник пуст — создаём, что удалять
     if db.last_episode(uid) is None:

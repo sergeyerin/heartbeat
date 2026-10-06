@@ -1497,10 +1497,10 @@ async def action_med(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     default_name = db.default_med_name(user_id)
     med = db.add_med(user_id, name=default_name, taken_at=update.message.date)
-    # Плашку возвращаем ТОЛЬКО если приём пришёл командой (/med): набор текста
-    # прячет нижнее меню. Нажатие кнопки «💊 Лекарство» меню не прячет (чтобы её
-    # нажать, оно было видно) — тогда отдельное подтверждение лишь мусор в чате.
-    if update.message.text not in ACTION_BY_TEXT:
+    # Плашку возвращаем командой /med (набор текста прячет меню). Нажатие кнопки
+    # меню не прячет. У безымянного приёма плашку вернёт запрос названия ниже,
+    # поэтому здесь — только для приёма с известным именем.
+    if med.name is not None and update.message.text not in ACTION_BY_TEXT:
         await update.message.reply_text(
             t(lang, "med_logged", time=report.hhmm(med.taken_at)),
             reply_markup=main_keyboard(_active(user_id) is not None, lang),
@@ -1508,6 +1508,14 @@ async def action_med(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await _send_med_card(update, context, med, lang)
     _retire_same_name(context, user_id, med)
     _enforce_live_med_cap(context, user_id)
+    if med.name is None:
+        # Истории нет → имя неизвестно. Сразу встаём в ожидание названия и ПРОСИМ
+        # его явно: иначе набранное сразу название уходило в «записать это как
+        # новый эпизод?» (ждали нажатия «🏷 Название», а человек печатал сразу).
+        context.user_data["await"] = {"what": "med", "id": med.id}
+        await update.message.reply_text(
+            t(lang, "med_name_prompt"),
+            reply_markup=main_keyboard(_active(user_id) is not None, lang))
 
 
 
