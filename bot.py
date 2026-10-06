@@ -1378,6 +1378,15 @@ async def action_med(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     default_name = db.default_med_name(user_id)
     med = db.add_med(user_id, name=default_name, taken_at=update.message.date)
+    # Плашку держим отдельным коротким сообщением, как у эпизода: карточка
+    # несёт инлайн-клавиатуру, а нижнее меню умеет ехать только на reply-
+    # клавиатуре. Без этого во время работы только с карточками приёма плашка
+    # уезжала — «пропало меню снизу». Карточка идёт следом и остаётся
+    # последним сообщением.
+    await update.message.reply_text(
+        t(lang, "med_logged", time=report.hhmm(med.taken_at)),
+        reply_markup=main_keyboard(_active(user_id) is not None, lang),
+    )
     await _send_med_card(update, context, med, lang)
     _enforce_live_med_cap(context, user_id)
 

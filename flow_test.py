@@ -1561,6 +1561,19 @@ async def run() -> None:
     check(f"mtick:{uid}:{rec.id}" in JQ.store, "тик карточки приёма восстановлен после рестарта")
     db.delete_med(uid, rec.id)
 
+    # 19s2. «💊 Лекарство» возвращает нижнюю плашку: карточка инлайновая, а меню
+    # ездит только на reply-клавиатуре — иначе во время работы с карточками оно
+    # пропадало. Плашка идёт отдельным сообщением, карточка — следом (последней).
+    fake.markups.clear(); fake.sent.clear()
+    await tap(t(LANG, "btn_med"))
+    plate_type = type(bot.main_keyboard(True, LANG))
+    check(any(isinstance(m, plate_type) for m in fake.markups),
+          "нажатие «💊 Лекарство» возвращает нижнюю плашку")
+    last_live = max(db.live_med_cards(uid, cfg.MED_TICK_MAX_H * 60), key=lambda m: m.id)
+    db.set_med_card_msg(uid, last_live.id, None)
+    bot._cancel_med_tick(JQ, uid, last_live.id)
+    db.delete_med(uid, last_live.id)
+
     # 19t. Предохранители и починки приёма лекарств (ревью med-фичи).
     # Чистим живые карточки от предыдущих блоков, чтобы счёт был предсказуем.
     for m in db.live_med_cards(uid, cfg.MED_TICK_MAX_H * 60):

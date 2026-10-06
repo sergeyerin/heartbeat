@@ -295,6 +295,8 @@ STRINGS: dict[str, dict[str, str]] = {
     # --- лекарства ---
     # --- карточка приёма лекарства ---
     "med_unnamed": {"ru": "Лекарство", "en": "Medication"},
+    "med_logged": {"ru": "💊 Записал приём в {time}.",
+                   "en": "💊 Medication logged at {time}."},
     "med_card_fresh": {"ru": "💊 {name} — принято только что",
                        "en": "💊 {name} — taken just now"},
     "med_card_since": {"ru": "💊 {name} — принято {dur} назад",
