@@ -1517,8 +1517,8 @@ async def run() -> None:
     check(mcard.card_msg is not None, "карточка приёма создана")
     mtick = f"mtick:{uid}:{mcard.id}"
     check(mtick in JQ.store, "счётчик карточки запущен")
-    check(any("принято только что" in m for m in fake.sent),
-          "свежий приём: «принято только что»")
+    check(any("только что" in m and "#лекарство" in m for m in fake.sent),
+          "свежий приём: «только что» и тег #лекарство в карточке")
 
     # сетка «когда» — «только что» = точно, сдвиги НАКОПИТЕЛЬНЫЕ
     fake.markups.clear()
@@ -1545,8 +1545,8 @@ async def run() -> None:
     tick_job = SimpleNamespace(data={"med_id": mcard.id}, user_id=uid, chat_id=uid,
                                schedule_removal=lambda: None)
     await bot._med_tick(SimpleNamespace(bot=fake, job=tick_job, job_queue=JQ, user_data=ud))
-    check(any("1 ч" in m and "назад" in m for m in fake.edited),
-          "счётчик показывает «принято 1 ч ... назад»")
+    check(any("прошло" in m and "1 ч" in m for m in fake.edited),
+          "счётчик показывает «прошло 1 ч»")
 
     # сменить название: ожидание ввода — ЯВНЫМ сообщением с плашкой; после ввода
     # карточка правится на месте, без лишнего подтверждения.

@@ -215,6 +215,19 @@ def main() -> int:
         check(with_ep.index("☀️ День") < with_ep.index("⚡️ Аритмии"),
               "лекарства сверху, аритмии — блоком внизу")
 
+        # --- формат карточки приёма: время · название · сколько прошло · тег ---
+        mc_fresh = db.Med(id=950, user_id=uid, taken_at=db.utcnow(),
+                          name="Конкор", approx=True)
+        mc_txt = report.med_card(mc_fresh, LANG)
+        check("Конкор" in mc_txt and "#лекарство" in mc_txt,
+              "карточка приёма: название и тег #лекарство")
+        check("примерн" not in mc_txt,
+              "карточка приёма: «примерно» в тексте не пишем (approx=1, но текста нет)")
+        check("только что" in mc_txt, "карточка приёма: свежий — «только что»")
+        mc_old = db.Med(id=951, user_id=uid, taken_at=db.utcnow() - timedelta(minutes=11),
+                        name="Конкор")
+        check("прошло" in report.med_card(mc_old, LANG), "карточка приёма: «прошло N»")
+
         month_start, _ = report.day_bounds(day - timedelta(days=29))
         rep = report.period_report(30, db.list_episodes(uid, month_start), db.list_meds(uid, month_start), LANG)
         check("Отчёт за 30" in rep and "По времени суток" in rep, "отчёт за период")

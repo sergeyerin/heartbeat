@@ -346,22 +346,27 @@ def period_report(days: int, episodes: list[Episode], meds: list[Med], lang: str
 # --- карточка приёма лекарства ---------------------------------------------
 
 def med_card(med: Med, lang: str) -> str:
-    """Живая карточка приёма: сколько времени прошло — чтобы знать, когда
-    принимать следующий раз. Бот интервал не знает и не подсказывает его —
-    только честно считает «принято N назад»."""
+    """Живая карточка приёма: время · название · сколько прошло, плюс тег для
+    поиска. «Примерно» в тексте НЕ пишем — считаем, что время человек выставил
+    кнопками сам. Бот интервал до следующего приёма не знает и не подсказывает —
+    только честно считает, сколько прошло."""
     now = datetime.now(timezone.utc)
     name = med.name or t(lang, "med_unnamed")
-    elapsed = med.since(now)
-    if elapsed < timedelta(minutes=1):
-        head = t(lang, "med_card_fresh", name=name)
+    # Время: для сегодняшнего приёма — просто часы, иначе с днём (через полночь
+    # «15:00» было бы неоднозначным).
+    if local(med.taken_at).date() == today_local():
+        when = hhmm(med.taken_at)
     else:
-        head = t(lang, "med_card_since", name=name,
-                 dur=human_duration(elapsed, lang))
-    when = t(lang, "med_card_when", day=_day_prefix(med.taken_at, lang),
-             time=hhmm(med.taken_at))
-    if med.approx:
-        when += t(lang, "med_card_approx")
-    return head + "\n" + when
+        when = t(lang, "med_card_when", day=_day_prefix(med.taken_at, lang),
+                 time=hhmm(med.taken_at))
+    elapsed = med.since(now)
+    ago = (t(lang, "med_card_fresh") if elapsed < timedelta(minutes=1)
+           else t(lang, "med_card_ago", dur=human_duration(elapsed, lang)))
+    return "\n".join([
+        t(lang, "med_card_head", when=when, name=name),
+        ago,
+        t(lang, "med_tag"),
+    ])
 
 
 # --- экспорт ---------------------------------------------------------------
